@@ -42,14 +42,21 @@ class SchedulerConfig(BaseModel):
 class BaselinePolicyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    mode: str = "estimated_completion_time"
+    algorithm: str = "fcfs"
+    mode: str | None = None
 
-    @field_validator("mode")
+    @model_validator(mode="after")
+    def normalize_mode_alias(self) -> BaselinePolicyConfig:
+        if self.mode is not None:
+            self.algorithm = self.mode
+        return self
+
+    @field_validator("algorithm")
     @classmethod
-    def validate_mode(cls, value: str) -> str:
-        if value not in {"shortest_queue", "estimated_completion_time"}:
+    def validate_algorithm(cls, value: str) -> str:
+        if value not in {"fcfs", "short_queue_runtime", "estimated_completion_time"}:
             raise ValueError(
-                "policy.baseline_sp1.mode must be one of: shortest_queue, estimated_completion_time"
+                "policy.baseline_sp1.algorithm must be one of: fcfs, short_queue_runtime, estimated_completion_time"
             )
         return value
 
