@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from vllm_omni.global_scheduler.policies.base import BasePolicy
 from vllm_omni.global_scheduler.policies.baseline_fcfs import BaselineFCFSPolicy
+from vllm_omni.global_scheduler.policies.baseline_short_queue_runtime import BaselineShortQueueRuntimePolicy
+from vllm_omni.global_scheduler.policies.runtime_estimator import RuntimeEstimator
 from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDecision, RuntimeStats
 
 
@@ -12,6 +14,11 @@ class BaselinePolicy(BasePolicy):
         self._delegate: BasePolicy
         if algorithm == "fcfs":
             self._delegate = BaselineFCFSPolicy(tie_breaker=tie_breaker)
+        elif algorithm == "short_queue_runtime":
+            self._delegate = BaselineShortQueueRuntimePolicy(
+                tie_breaker=tie_breaker,
+                estimator=RuntimeEstimator(),
+            )
         else:
             raise ValueError(
                 "Unsupported baseline algorithm. expected one of: fcfs, short_queue_runtime, estimated_completion_time"
