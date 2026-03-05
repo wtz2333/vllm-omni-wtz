@@ -1,3 +1,5 @@
+"""Estimated completion time policy behavior tests."""
+
 import pytest
 
 from vllm_omni.global_scheduler.policies.estimated_completion_time import EstimatedCompletionTimePolicy
@@ -8,6 +10,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_estimated_completion_time_selects_lowest_score():
+    """ECT should route to the instance with the smallest computed score."""
     estimator = RuntimeEstimator(profiling_data={(1280, 720, 50): 2.0})
     policy = EstimatedCompletionTimePolicy(estimator=estimator, tie_breaker="lexical")
     request = RequestMeta(request_id="r1", width=1280, height=720, num_inference_steps=50)
@@ -27,6 +30,7 @@ def test_estimated_completion_time_selects_lowest_score():
 
 
 def test_estimated_completion_time_uses_fallback_when_profiling_missing():
+    """ECT should fallback to EWMA service time when profiling misses."""
     estimator = RuntimeEstimator(profiling_data={(1280, 720, 50): 2.0})
     policy = EstimatedCompletionTimePolicy(estimator=estimator, tie_breaker="lexical")
     request = RequestMeta(request_id="r2", width=640, height=360, num_inference_steps=20)

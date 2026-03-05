@@ -5,12 +5,24 @@ from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDec
 
 
 class FirstComeFirstServedPolicy(PolicyBase):
+    """FCFS baseline policy with load-aware fallback tie handling."""
+
     def select_instance(
         self,
         request: RequestMeta,
         instances: list[InstanceSpec],
         runtime_stats: dict[str, RuntimeStats],
     ) -> RouteDecision:
+        """Choose first available instance, fallback to lowest inflight.
+
+        Args:
+            request: Request metadata (unused by FCFS).
+            instances: Candidate instances in input order.
+            runtime_stats: Runtime snapshot for candidate instances.
+
+        Returns:
+            Route decision with selected instance and score.
+        """
         del request
         if not instances:
             raise ValueError("No instances configured")

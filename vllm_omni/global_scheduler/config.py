@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 
 class ServerConfig(BaseModel):
+    """Top-level scheduler server settings."""
+
     model_config = ConfigDict(extra="forbid")
 
     host: str = "0.0.0.0"
@@ -18,6 +20,8 @@ class ServerConfig(BaseModel):
 
 
 class SchedulerConfig(BaseModel):
+    """Global scheduler runtime tuning parameters."""
+
     model_config = ConfigDict(extra="forbid")
 
     tie_breaker: str = "random"
@@ -32,6 +36,8 @@ class SchedulerConfig(BaseModel):
 
 
 class BaselinePolicyConfig(BaseModel):
+    """Baseline policy family configuration."""
+
     model_config = ConfigDict(extra="forbid")
 
     algorithm: str = "fcfs"
@@ -47,12 +53,16 @@ class BaselinePolicyConfig(BaseModel):
 
 
 class PolicyConfig(BaseModel):
+    """Policy namespace root configuration."""
+
     model_config = ConfigDict(extra="forbid")
 
     baseline: BaselinePolicyConfig = Field(default_factory=BaselinePolicyConfig)
 
 
 class InstanceConfig(BaseModel):
+    """Static upstream instance configuration entry."""
+
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -88,6 +98,8 @@ class InstanceConfig(BaseModel):
 
 
 class GlobalSchedulerConfig(BaseModel):
+    """Validated root config object for global scheduler service."""
+
     model_config = ConfigDict(extra="forbid")
 
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -104,6 +116,14 @@ class GlobalSchedulerConfig(BaseModel):
 
 
 def load_config(config_path: str | Path) -> GlobalSchedulerConfig:
+    """Load and validate global scheduler YAML config.
+
+    Args:
+        config_path: Path to scheduler YAML file.
+
+    Returns:
+        Parsed and validated scheduler config model.
+    """
     path = Path(config_path)
     try:
         payload = yaml.safe_load(path.read_text(encoding="utf-8"))

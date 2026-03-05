@@ -1,3 +1,5 @@
+"""Short queue runtime policy behavior tests."""
+
 import pytest
 
 from vllm_omni.global_scheduler.policies.runtime_estimator import RuntimeEstimator
@@ -8,6 +10,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_short_queue_runtime_prefers_lower_estimated_queue_runtime():
+    """Policy should prefer instance with smaller estimated queue runtime."""
     estimator = RuntimeEstimator(profiling_data={(1280, 720, 50): 2.0})
     policy = ShortQueueRuntimePolicy(estimator=estimator, tie_breaker="lexical")
     request = RequestMeta(request_id="r1", width=1280, height=720, num_inference_steps=50)
@@ -27,6 +30,7 @@ def test_short_queue_runtime_prefers_lower_estimated_queue_runtime():
 
 
 def test_short_queue_runtime_uses_ewma_fallback_when_profile_missing():
+    """Policy should fallback to EWMA estimate when profile lookup misses."""
     estimator = RuntimeEstimator(profiling_data={(1280, 720, 50): 2.0})
     policy = ShortQueueRuntimePolicy(estimator=estimator, tie_breaker="lexical")
     request = RequestMeta(request_id="r2", width=640, height=360, num_inference_steps=20)

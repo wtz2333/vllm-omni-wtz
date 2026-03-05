@@ -7,6 +7,8 @@ from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDec
 
 
 class PolicyBase(ABC):
+    """Base interface for global scheduler routing policies."""
+
     def __init__(self, tie_breaker: str = "random") -> None:
         if tie_breaker not in {"random", "lexical"}:
             raise ValueError("tie_breaker must be one of: random, lexical")
@@ -19,6 +21,16 @@ class PolicyBase(ABC):
         instances: list[InstanceSpec],
         runtime_stats: dict[str, RuntimeStats],
     ) -> RouteDecision:
+        """Select one upstream instance for a request.
+
+        Args:
+            request: Parsed routing metadata for the incoming request.
+            instances: Candidate upstream instances.
+            runtime_stats: Snapshot runtime counters keyed by instance id.
+
+        Returns:
+            Route decision containing target endpoint and routing score.
+        """
         raise NotImplementedError
 
     def _is_available(self, instance: InstanceSpec, runtime_stats: dict[str, RuntimeStats]) -> bool:

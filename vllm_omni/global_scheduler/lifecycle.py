@@ -11,6 +11,8 @@ from .types import InstanceSpec, RuntimeStats
 
 @dataclass(slots=True)
 class InstanceLifecycleStatus:
+    """Lifecycle and health state tracked for a single instance."""
+
     instance: InstanceSpec
     enabled: bool = True
     healthy: bool = True
@@ -20,6 +22,8 @@ class InstanceLifecycleStatus:
 
 
 class InstanceLifecycleManager:
+    """Manage per-instance lifecycle, health, and routability state."""
+
     def __init__(self, instances: list[InstanceSpec]) -> None:
         """Initialize lifecycle manager with configured instances.
 
@@ -35,6 +39,11 @@ class InstanceLifecycleManager:
         }
 
     def snapshot(self) -> dict[str, InstanceLifecycleStatus]:
+        """Return an immutable snapshot of lifecycle state.
+
+        Returns:
+            Mapping from instance id to copied lifecycle status.
+        """
         with self._lock:
             return {
                 instance_id: InstanceLifecycleStatus(
@@ -49,6 +58,11 @@ class InstanceLifecycleManager:
             }
 
     def get_routable_instances(self) -> list[InstanceSpec]:
+        """List instances currently eligible for routing.
+
+        Returns:
+            Instances that are enabled, healthy, and not draining.
+        """
         with self._lock:
             return [
                 status.instance
@@ -155,12 +169,28 @@ class InstanceLifecycleManager:
                         status.draining = False
 
     def _get_status(self, instance_id: str) -> InstanceLifecycleStatus:
+        """Fetch mutable lifecycle status for one instance.
+
+        Args:
+            instance_id: Target instance id.
+
+        Returns:
+            Internal mutable lifecycle status object.
+        """
         if instance_id not in self._instances:
             raise KeyError(f"Unknown instance id: {instance_id}")
         return self._instances[instance_id]
 
     @staticmethod
     def _copy_status(status: InstanceLifecycleStatus) -> InstanceLifecycleStatus:
+        """Create a detached copy of lifecycle status.
+
+        Args:
+            status: Source lifecycle status.
+
+        Returns:
+            Copied lifecycle status safe for external consumers.
+        """
         return InstanceLifecycleStatus(
             instance=status.instance,
             enabled=status.enabled,
@@ -172,6 +202,15 @@ class InstanceLifecycleManager:
 
 
 def _probe_tcp_alive(endpoint: str, timeout_s: float) -> tuple[bool, str | None]:
+    """Probe endpoint TCP connectivity for health-checking.
+
+    Args:
+        endpoint: Upstream endpoint in `http://host:port` format.
+        timeout_s: TCP dial timeout in seconds.
+
+    Returns:
+        Tuple `(healthy, error_message)` where error is `None` on success.
+    """
     try:
         parsed = urlparse(endpoint)
         if parsed.hostname is None or parsed.port is None:

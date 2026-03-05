@@ -1,3 +1,5 @@
+"""First-come-first-served routing policy tests."""
+
 import pytest
 
 from vllm_omni.global_scheduler.policies.first_come_first_served import FirstComeFirstServedPolicy
@@ -7,6 +9,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_fcfs_selects_first_available_instance():
+    """FCFS should select the first available instance in order."""
     policy = FirstComeFirstServedPolicy(tie_breaker="lexical")
     request = RequestMeta(request_id="r1")
     instances = [
@@ -26,6 +29,7 @@ def test_fcfs_selects_first_available_instance():
 
 
 def test_fcfs_falls_back_to_lexical_when_all_busy():
+    """FCFS should use tie-breaker fallback when no instance is available."""
     policy = FirstComeFirstServedPolicy(tie_breaker="lexical")
     request = RequestMeta(request_id="r2")
     instances = [

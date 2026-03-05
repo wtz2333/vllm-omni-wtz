@@ -9,7 +9,15 @@ from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDec
 
 
 class AlgorithmPolicyRouter(PolicyBase):
+    """Policy router delegating baseline algorithms by config value."""
+
     def __init__(self, algorithm: str, tie_breaker: str = "random") -> None:
+        """Build router and instantiate selected baseline policy.
+
+        Args:
+            algorithm: Baseline algorithm name.
+            tie_breaker: Strategy for equal-score candidates.
+        """
         super().__init__(tie_breaker=tie_breaker)
         self._algorithm = algorithm
         self._delegate: PolicyBase
@@ -36,6 +44,16 @@ class AlgorithmPolicyRouter(PolicyBase):
         instances: list[InstanceSpec],
         runtime_stats: dict[str, RuntimeStats],
     ) -> RouteDecision:
+        """Delegate request routing to selected baseline policy.
+
+        Args:
+            request: Parsed request metadata.
+            instances: Candidate upstream instances.
+            runtime_stats: Runtime snapshot for candidates.
+
+        Returns:
+            Route decision augmented with router algorithm tag.
+        """
         decision = self._delegate.select_instance(request=request, instances=instances, runtime_stats=runtime_stats)
         decision.reason = f"router={self._algorithm};{decision.reason}"
         return decision

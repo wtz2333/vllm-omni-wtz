@@ -1,3 +1,5 @@
+"""Router construction and delegation behavior tests."""
+
 import textwrap
 
 import pytest
@@ -13,6 +15,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_router_builds_fcfs_policy(tmp_path):
+    """Router should construct FCFS delegate when configured."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -37,6 +40,7 @@ def test_router_builds_fcfs_policy(tmp_path):
 
 
 def test_router_rejects_unknown_scheduler_type(tmp_path):
+    """Unexpected scheduler keys should fail strict config validation."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -54,10 +58,11 @@ def test_router_rejects_unknown_scheduler_type(tmp_path):
     )
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
-      load_config(config_path)
+        load_config(config_path)
 
 
 def test_router_builds_short_queue_runtime_policy(tmp_path):
+    """Router should construct short_queue_runtime delegate when configured."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -82,6 +87,7 @@ def test_router_builds_short_queue_runtime_policy(tmp_path):
 
 
 def test_router_builds_estimated_completion_time_policy(tmp_path):
+    """Router should construct estimated_completion_time delegate when configured."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -106,6 +112,7 @@ def test_router_builds_estimated_completion_time_policy(tmp_path):
 
 
 def test_router_reason_uses_router_prefix_without_duplicate_algorithm_marker(tmp_path):
+    """Router reason should include router prefix without duplicating algorithm tag."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(

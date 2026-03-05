@@ -20,6 +20,14 @@ from .types import InstanceSpec
 
 
 def _build_health_payload(config: Any) -> tuple[int, dict[str, Any]]:
+    """Build health response payload from current app config state.
+
+    Args:
+        config: Current scheduler config object, or None when unavailable.
+
+    Returns:
+        Tuple of HTTP status code and JSON response payload.
+    """
     checks = {
         "config_loaded": isinstance(config, GlobalSchedulerConfig),
         "has_instances": False,
@@ -41,6 +49,14 @@ def _build_health_payload(config: Any) -> tuple[int, dict[str, Any]]:
 
 
 def _to_instance_specs(config: GlobalSchedulerConfig) -> list[InstanceSpec]:
+    """Convert validated config model to instance specs used at runtime.
+
+    Args:
+        config: Global scheduler config.
+
+    Returns:
+        Instance specification list for runtime state components.
+    """
     return [
         InstanceSpec(
             id=instance.id,
@@ -58,6 +74,15 @@ class ReloadResponse(BaseModel):
 
 
 def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> FastAPI:
+    """Create FastAPI app with scheduler lifecycle endpoints.
+
+    Args:
+        config: Initial validated scheduler config.
+        config_loader: Optional callable used by reload endpoint.
+
+    Returns:
+        Configured FastAPI application instance.
+    """
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         async def _run() -> None:
@@ -181,18 +206,29 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
 
 
 def run_server(config_path: str) -> None:
+    """Run scheduler API server from YAML config path.
+
+    Args:
+        config_path: Path to scheduler YAML config.
+    """
     config = load_config(config_path)
     app = create_app(config, config_loader=lambda: load_config(config_path))
     uvicorn.run(app, host=config.server.host, port=config.server.port)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
+    """Build CLI parser for scheduler standalone server entrypoint.
+
+    Returns:
+        Argument parser with scheduler server options.
+    """
     parser = argparse.ArgumentParser(description="Run vLLM-Omni global scheduler server")
     parser.add_argument("--config", required=True, help="Path to global scheduler YAML config")
     return parser
 
 
 def main() -> None:
+    """CLI entrypoint for standalone global scheduler server."""
     args = build_arg_parser().parse_args()
     run_server(args.config)
 

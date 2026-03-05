@@ -6,11 +6,19 @@ from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDec
 
 
 class ShortQueueRuntimePolicy(PolicyBase):
+    """Route to instance with minimum estimated queue runtime."""
+
     def __init__(
         self,
         estimator: RuntimeEstimator,
         tie_breaker: str = "random",
     ) -> None:
+        """Initialize short-queue-runtime policy.
+
+        Args:
+            estimator: Runtime estimator with profiling/EWMA fallback support.
+            tie_breaker: Strategy for equal-score candidates.
+        """
         super().__init__(tie_breaker=tie_breaker)
         self._estimator = estimator
 
@@ -27,6 +35,16 @@ class ShortQueueRuntimePolicy(PolicyBase):
         instances: list[InstanceSpec],
         runtime_stats: dict[str, RuntimeStats],
     ) -> RouteDecision:
+        """Select instance with lowest estimated queue runtime.
+
+        Args:
+            request: Parsed request metadata.
+            instances: Candidate upstream instances.
+            runtime_stats: Runtime snapshot for candidates.
+
+        Returns:
+            Route decision with minimum queue-runtime score.
+        """
         if not instances:
             raise ValueError("No instances configured")
 

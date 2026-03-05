@@ -6,11 +6,19 @@ from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDec
 
 
 class EstimatedCompletionTimePolicy(PolicyBase):
+    """Route to instance with minimum estimated completion time (ECT)."""
+
     def __init__(
         self,
         estimator: RuntimeEstimator,
         tie_breaker: str = "random",
     ) -> None:
+        """Initialize ECT policy.
+
+        Args:
+            estimator: Runtime estimator with profiling/EWMA fallback support.
+            tie_breaker: Strategy for equal-score candidates.
+        """
         super().__init__(tie_breaker=tie_breaker)
         self._estimator = estimator
 
@@ -28,6 +36,16 @@ class EstimatedCompletionTimePolicy(PolicyBase):
         instances: list[InstanceSpec],
         runtime_stats: dict[str, RuntimeStats],
     ) -> RouteDecision:
+        """Select instance with lowest estimated completion time.
+
+        Args:
+            request: Parsed request metadata.
+            instances: Candidate upstream instances.
+            runtime_stats: Runtime snapshot for candidates.
+
+        Returns:
+            Route decision with minimum completion-time score.
+        """
         if not instances:
             raise ValueError("No instances configured")
 
