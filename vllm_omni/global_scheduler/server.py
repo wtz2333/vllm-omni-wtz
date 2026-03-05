@@ -4,10 +4,16 @@ import argparse
 import asyncio
 import contextlib
 from contextlib import asynccontextmanager
+import json
+import socket
+import time
+import uuid
 from typing import Any
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -15,8 +21,110 @@ from vllm_omni.version import __version__
 
 from .config import GlobalSchedulerConfig, load_config
 from .lifecycle import InstanceLifecycleManager
+from .router import build_policy
 from .state import RuntimeStateStore
-from .types import InstanceSpec
+from .types import InstanceSpec, RequestMeta
+
+
+class UpstreamHTTPError(Exception):
+    """Represents non-2xx HTTP response returned by upstream instance."""
+
+    def __init__(self, status_code: int, body: bytes) -> None:
+        self.status_code = status_code
+        self.body = body
+
+
+def _build_error_payload(code: str, message: str, request_id: str) -> dict[str, Any]:
+    """Build normalized error body following GS_* contract.
+
+    Args:
+        code: Stable global scheduler error code.
+        message: Human-readable error description.
+        request_id: Current request identifier.
+
+    Returns:
+        Error payload object under `error` field.
+    """
+    return {
+        "error": {
+            "code": code,
+            "message": message,
+            "request_id": request_id,
+        }
+    }
+
+
+def _extract_request_meta(payload: dict[str, Any], request_id: str) -> RequestMeta:
+    """Extract scheduler metadata from OpenAI-compatible request payload.
+
+    Args:
+        payload: JSON payload from incoming request body.
+        request_id: Stable request identifier used for tracing.
+
+    Returns:
+        Parsed request metadata used by routing policies.
+    """
+    extra_body = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
+
+    return RequestMeta(
+        request_id=request_id,
+        width=extra_body.get("width"),
+        height=extra_body.get("height"),
+        num_frames=extra_body.get("num_frames"),
+        num_inference_steps=extra_body.get("num_inference_steps"),
+    )
+
+
+def _filter_forward_headers(headers: Any) -> dict[str, str]:
+    """Filter inbound headers before forwarding request upstream.
+
+    Args:
+        headers: Incoming request headers mapping.
+
+    Returns:
+        Sanitized headers suitable for upstream POST request.
+    """
+    skipped = {"host", "content-length", "connection"}
+    return {key: value for key, value in headers.items() if key.lower() not in skipped}
+
+
+def _proxy_chat_completion(
+    endpoint: str,
+    body: bytes,
+    headers: dict[str, str],
+    timeout_s: int,
+) -> bytes:
+    """Forward chat completion request to one upstream endpoint.
+
+    Args:
+        endpoint: Base upstream endpoint.
+        body: Serialized request body.
+        headers: Forwarded HTTP headers.
+        timeout_s: Upstream request timeout in seconds.
+
+    Returns:
+        Raw response body from upstream on success.
+
+    Raises:
+        TimeoutError: Upstream timeout.
+        OSError: Network-level transport failure.
+        UpstreamHTTPError: Upstream returned non-2xx response.
+    """
+    url = f"{endpoint}/v1/chat/completions"
+    request = urllib_request.Request(url=url, data=body, headers=headers, method="POST")
+
+    try:
+        with urllib_request.urlopen(request, timeout=timeout_s) as upstream_response:  # noqa: S310
+            return upstream_response.read()
+    except urllib_error.HTTPError as exc:
+        raise UpstreamHTTPError(status_code=exc.code, body=exc.read()) from exc
+    except urllib_error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            raise TimeoutError("upstream request timed out") from exc
+        raise OSError(f"upstream network error: {reason}") from exc
+    except (socket.timeout, TimeoutError) as exc:
+        raise TimeoutError("upstream request timed out") from exc
 
 
 def _build_health_payload(config: Any) -> tuple[int, dict[str, Any]]:
@@ -116,6 +224,7 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
         ewma_alpha=config.scheduler.ewma_alpha,
     )
     app.state.instance_lifecycle_manager = InstanceLifecycleManager(instance_specs)
+    app.state.policy = build_policy(config)
     app.state.config_loader = config_loader
     app.state.health_probe_task = None
 
@@ -189,6 +298,7 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
             new_instance_specs,
             runtime_snapshot=app.state.runtime_state_store.snapshot(),
         )
+        app.state.policy = build_policy(new_config)
         app.state.instance_lifecycle_manager.converge_draining(app.state.runtime_state_store.snapshot())
         return ReloadResponse(status="ok", instance_count=len(new_instance_specs))
 
@@ -201,6 +311,105 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
         )
         app.state.instance_lifecycle_manager.converge_draining(app.state.runtime_state_store.snapshot())
         return JSONResponse(status_code=200, content={"status": "ok"})
+
+    @app.post("/v1/chat/completions")
+    async def chat_completions(request: Request) -> Response:
+        payload = await request.json()
+        request_id = request.headers.get("x-request-id") or payload.get("request_id") or str(uuid.uuid4())
+        request_meta = _extract_request_meta(payload, request_id=request_id)
+        runtime_snapshot = app.state.runtime_state_store.snapshot()
+        candidates = app.state.instance_lifecycle_manager.get_routable_instances()
+        if not candidates:
+            return JSONResponse(
+                status_code=503,
+                content=_build_error_payload(
+                    code="GS_NO_ROUTABLE_INSTANCE",
+                    message="No routable instance is available",
+                    request_id=request_id,
+                ),
+            )
+
+        try:
+            decision = app.state.policy.select_instance(
+                request=request_meta,
+                instances=candidates,
+                runtime_stats=runtime_snapshot,
+            )
+        except (ValueError, KeyError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content=_build_error_payload(
+                    code="GS_NO_ROUTABLE_INSTANCE",
+                    message=str(exc),
+                    request_id=request_id,
+                ),
+            )
+
+        app.state.runtime_state_store.on_request_start(decision.instance_id)
+        started_at = time.monotonic()
+        current_config = getattr(app.state, "global_scheduler_config", config)
+        response: Response
+        try:
+            response_body = await asyncio.to_thread(
+                _proxy_chat_completion,
+                decision.endpoint,
+                json.dumps(payload).encode("utf-8"),
+                _filter_forward_headers(request.headers),
+                current_config.server.request_timeout_s,
+            )
+            response = Response(status_code=200, content=response_body, media_type="application/json")
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
+                ok=True,
+            )
+        except UpstreamHTTPError as exc:
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
+                ok=False,
+            )
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_HTTP_ERROR",
+                    message=f"Upstream returned HTTP {exc.status_code}",
+                    request_id=request_id,
+                ),
+            )
+        except TimeoutError:
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
+                ok=False,
+            )
+            response = JSONResponse(
+                status_code=502,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_TIMEOUT",
+                    message="Upstream request timed out",
+                    request_id=request_id,
+                ),
+            )
+        except OSError as exc:
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
+                ok=False,
+            )
+            response = JSONResponse(
+                status_code=502,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_NETWORK_ERROR",
+                    message=str(exc),
+                    request_id=request_id,
+                ),
+            )
+
+        response.headers["X-Routed-Instance"] = decision.instance_id
+        response.headers["X-Route-Reason"] = decision.reason
+        response.headers["X-Route-Score"] = str(decision.score)
+        return response
 
     return app
 
