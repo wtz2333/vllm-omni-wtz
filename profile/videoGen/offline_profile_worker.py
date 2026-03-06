@@ -30,6 +30,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ring-degree", type=int, required=True)
     parser.add_argument("--cfg-parallel-size", type=int, required=True)
     parser.add_argument("--vae-patch-parallel-size", type=int, required=True)
+    parser.add_argument("--use-hsdp", action="store_true")
+    parser.add_argument("--hsdp-shard-size", type=int, default=-1)
+    parser.add_argument("--hsdp-replicate-size", type=int, default=1)
 
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--warmup-iters", type=int, default=1)
@@ -351,6 +354,9 @@ def main() -> None:
         cfg_parallel_size=args.cfg_parallel_size,
         tensor_parallel_size=args.tensor_parallel_size,
         vae_patch_parallel_size=args.vae_patch_parallel_size,
+        use_hsdp=args.use_hsdp,
+        hsdp_shard_size=args.hsdp_shard_size,
+        hsdp_replicate_size=args.hsdp_replicate_size,
     )
 
     print("[Worker] Loading Omni model...")
