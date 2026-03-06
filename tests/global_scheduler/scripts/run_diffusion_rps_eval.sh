@@ -34,7 +34,8 @@ log() {
 
 write_benchmark_config() {
   local yaml_path="$1"
-  eval "$(python3 - "${yaml_path}" <<'PY'
+  local rendered
+  if ! rendered="$(python3 - "${yaml_path}" "${REPO_ROOT}" <<'PY'
 import json
 import shlex
 import sys
@@ -54,10 +55,13 @@ def q(value: str) -> str:
 
 
 yaml_path = Path(sys.argv[1])
+repo_root = Path(sys.argv[2]).resolve()
 cfg = yaml.safe_load(yaml_path.read_text(encoding="utf-8")) or {}
 
 runtime = cfg.get("runtime", {})
 run_root = Path(str(runtime.get("run_root", "./benchmark_outputs/global_scheduler")))
+if not run_root.is_absolute():
+    run_root = repo_root / run_root
 run_name_prefix = str(runtime.get("run_name_prefix", "run_"))
 timestamp_format = str(runtime.get("timestamp_format", "%Y%m%d-%H%M%S"))
 log_dir_name = str(runtime.get("log_dir_name", "logs"))
@@ -106,7 +110,12 @@ for key, value in {
 }.items():
     print(f"{key}={q(value)}")
 PY
-)"
+)"; then
+    echo "Failed to generate benchmark config from YAML: ${yaml_path}" >&2
+    exit 2
+  fi
+
+  eval "${rendered}"
 }
 
 main() {

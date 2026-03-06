@@ -51,12 +51,38 @@ def _setup_logging(log_dir: Path) -> logging.Logger:
 
 
 def _load_config(path: Path) -> dict[str, Any]:
+    tried_paths: list[Path] = []
+
+    # Resolve relative config paths against common invocation locations.
+    if path.is_absolute():
+        candidates = [path]
+    else:
+        script_dir = Path(__file__).resolve().parent
+        repo_root = script_dir.parents[2]
+        candidates = [
+            Path.cwd() / path,
+            script_dir / path,
+            repo_root / path,
+        ]
+
+    resolved_path: Path | None = None
+    for candidate in candidates:
+        normalized = candidate.expanduser().resolve(strict=False)
+        tried_paths.append(normalized)
+        if normalized.is_file():
+            resolved_path = normalized
+            break
+
+    if resolved_path is None:
+        tried = ", ".join(str(p) for p in tried_paths)
+        raise ValueError(f"Config file not found: {path}. Tried: {tried}")
+
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(resolved_path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ValueError(f"Config file not found: {path}") from exc
+        raise ValueError(f"Config file not found: {resolved_path}") from exc
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Invalid JSON config {path}: {exc}") from exc
+        raise ValueError(f"Invalid JSON config {resolved_path}: {exc}") from exc
 
 
 def _parse_rps_values(raw: Any) -> list[float]:
@@ -229,8 +255,11 @@ class ServiceOrchestrator:
             return False
 
         if label.startswith("instance_"):
-            # vLLM can be launched either via `vllm serve` CLI or Python module entrypoints.
-            return "vllm" in cmd and (" serve" in cmd or "api_server" in cmd)
+            # Instance can be launched by vLLM/vLLM-Omni CLI or Python module entrypoints.
+            return (
+                ("vllm" in cmd and (" serve" in cmd or "api_server" in cmd))
+                or "vllm_omni.entrypoints.cli.main" in cmd
+            )
 
         if label == "scheduler":
             return "vllm_omni.global_scheduler.server" in cmd
@@ -300,7 +329,9 @@ class ServiceOrchestrator:
         log_path = self.logs_dir / f"instance_{idx}.log"
 
         cmd = [
-            "vllm",
+            sys.executable,
+            "-m",
+            "vllm_omni.entrypoints.cli.main",
             "serve",
             self.model,
             "--omni",
@@ -756,11 +787,7 @@ class BenchmarkRunner:
             "p95_plot_png": p95_plot_path,
         }
 
-    def run(self) -> dict[str, str]:
-        rows: list[SweepRow] = []
-        for rps in self.rps_values:
-            rows.append(self._run_one(rps))
-
+    def _finalize_rows(self, rows: list[SweepRow]) -> dict[str, str]:
         csv_path, json_path = self._write_summary(rows)
         plot_paths = self._plot(rows)
 
@@ -772,6 +799,12 @@ class BenchmarkRunner:
             "slo_plot_png": str(plot_paths["slo_plot_png"]),
             "p95_plot_png": str(plot_paths["p95_plot_png"]),
         }
+
+    def run(self) -> dict[str, str]:
+        rows: list[SweepRow] = []
+        for rps in self.rps_values:
+            rows.append(self._run_one(rps))
+        return self._finalize_rows(rows)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -793,31 +826,59 @@ def main() -> None:
     runner = BenchmarkRunner(cfg, logger)
 
     deployment = cfg.get("deployment", {})
+
+    def _parse_bool_like(value: Any, field_name: str) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        raise ValueError(f"{field_name} must be a bool or a bool-like string")
+
     raw_manage_services = deployment.get("manage_services", True)
-    if isinstance(raw_manage_services, bool):
-        manage_services = raw_manage_services
-    elif isinstance(raw_manage_services, str):
-        normalized = raw_manage_services.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            manage_services = True
-        elif normalized in {"0", "false", "no", "off"}:
-            manage_services = False
-        else:
-            raise ValueError("deployment.manage_services must be a bool or a bool-like string")
-    else:
-        raise ValueError("deployment.manage_services must be a bool or a bool-like string")
+    manage_services = _parse_bool_like(raw_manage_services, "deployment.manage_services")
+
+    # Optional strong isolation mode: restart services for each RPS point.
+    raw_restart_per_rps = deployment.get("restart_services_between_rps", False)
+    restart_services_between_rps = _parse_bool_like(
+        raw_restart_per_rps,
+        "deployment.restart_services_between_rps",
+    )
+    if restart_services_between_rps and not manage_services:
+        raise ValueError(
+            "deployment.restart_services_between_rps=true requires deployment.manage_services=true"
+        )
 
     orchestrator: ServiceOrchestrator | None = None
     try:
-        if manage_services:
-            orchestrator = ServiceOrchestrator(cfg, logger, runner.output_dir)
-            target_url = orchestrator.start()
-            logger.info("Resolved benchmark target URL from orchestrator: %s", target_url)
-            runner.set_target_base_url(target_url)
-        elif runner.host is None or runner.port is None:
-            raise ValueError("deployment.manage_services=false requires benchmark.target_base_url in config")
+        if manage_services and restart_services_between_rps:
+            logger.info("Service isolation mode enabled: restarting services between RPS points")
+            rows: list[SweepRow] = []
+            for rps in runner.rps_values:
+                orchestrator = ServiceOrchestrator(cfg, logger, runner.output_dir)
+                target_url = orchestrator.start()
+                logger.info("Resolved benchmark target URL from orchestrator: %s", target_url)
+                runner.set_target_base_url(target_url)
+                try:
+                    rows.append(runner._run_one(rps))
+                finally:
+                    orchestrator.stop()
+                    orchestrator = None
+            outputs = runner._finalize_rows(rows)
+        else:
+            if manage_services:
+                orchestrator = ServiceOrchestrator(cfg, logger, runner.output_dir)
+                target_url = orchestrator.start()
+                logger.info("Resolved benchmark target URL from orchestrator: %s", target_url)
+                runner.set_target_base_url(target_url)
+            elif runner.host is None or runner.port is None:
+                raise ValueError("deployment.manage_services=false requires benchmark.target_base_url in config")
 
-        outputs = runner.run()
+            outputs = runner.run()
+
     finally:
         if orchestrator is not None:
             orchestrator.stop()

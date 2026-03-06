@@ -14,10 +14,10 @@ deployment:
   manage_services: true
   num_gpus: 1
   num_instances: 1
-  serving_model: "Qwen/Qwen-Image"
+  serving_model: "/home/wtz2333/model/hub/models--Qwen--Qwen-Image/snapshots/75e0b4be04f60ec59a75f475837eced720f823b6"
   instance_host: "127.0.0.1"
   instance_port_base: 19091
-  instance_gpu_map: [3]
+  instance_gpu_map: [0]
   instance_extra_args:
     - "--gpu-memory-utilization"
     - "0.9"
@@ -30,19 +30,21 @@ deployment:
   scheduler_algorithm: "estimated_completion_time"
   scheduler_tie_breaker: "random"
   scheduler_ewma_alpha: 0.2
+  manage_services: true
+  restart_services_between_rps: true
 
 benchmark:
   benchmark_name: "qwen_image_trace_t2i"
   benchmark_tool: "diffusion_serving"
-  model: "Qwen/Qwen-Image"
+  model: "/home/wtz2333/model/hub/models--Qwen--Qwen-Image/snapshots/75e0b4be04f60ec59a75f475837eced720f823b6"
   endpoint: "/v1/chat/completions"
   backend: "vllm-omni"
   task: "t2i"
   dataset: "trace"
   dataset_path: ""
   run_mode: "duration"
-  rps_values: [0.5]
-  total_duration_s: 1800
+  rps_values: [0.1,0.5,1]
+  total_duration_s: 500
   percentile_metrics: "e2el"
   metric_percentiles: "95"
   latency_metric: "e2el"
