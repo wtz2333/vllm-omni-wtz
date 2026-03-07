@@ -62,13 +62,14 @@
       "cfg_parallel_size": 1
     },
     {
-      "name": "sp4_ulysses",
+      "name": "sp4_ulysses_hsdp",
       "enabled": true,
       "vae_patch_parallel_size": 4,
       "tensor_parallel_size": 1,
       "ulysses_degree": 4,
       "ring_degree": 1,
-      "cfg_parallel_size": 1
+      "cfg_parallel_size": 1,
+      "use_hsdp": true
     },
     {
       "name": "tp2_sp2",
@@ -104,7 +105,8 @@
       "tensor_parallel_size": 1,
       "ulysses_degree": 2,
       "ring_degree": 1,
-      "cfg_parallel_size": 2
+      "cfg_parallel_size": 2,
+      "use_hsdp": true
     },
     {
       "name": "hsdp4",
@@ -126,9 +128,7 @@
       "ulysses_degree": 2,
       "ring_degree": 1,
       "cfg_parallel_size": 1,
-      "use_hsdp": true,
-      "hsdp_shard_size": 2,
-      "hsdp_replicate_size": 2
+      "use_hsdp": true
     },
     {
       "name": "hsdp2_cfg2",

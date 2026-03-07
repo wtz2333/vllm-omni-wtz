@@ -40,7 +40,7 @@ class ParallelConfig:
     ring_degree: int
     cfg_parallel_size: int
     use_hsdp: bool = False
-    hsdp_shard_size: int | None = None
+    hsdp_shard_size: int = -1
     hsdp_replicate_size: int = 1
 
     @property
