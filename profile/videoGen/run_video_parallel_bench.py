@@ -195,9 +195,7 @@ def load_parallel_configs(path: Path, selected_cards: set[int]) -> list[Parallel
                 cfg_parallel_size=int(cfg["cfg_parallel_size"]),
                 use_hsdp=bool(cfg.get("use_hsdp", False)),
                 hsdp_shard_size=(
-                    int(cfg["hsdp_shard_size"])
-                    if cfg.get("hsdp_shard_size") is not None
-                    else None
+                    int(cfg["hsdp_shard_size"]), -1
                 ),
                 hsdp_replicate_size=int(cfg.get("hsdp_replicate_size", 1)),
             )
