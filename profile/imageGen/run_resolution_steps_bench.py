@@ -3,6 +3,7 @@ import argparse
 import csv
 import json
 import os
+import socket
 import signal
 import statistics
 import subprocess
@@ -34,7 +35,10 @@ class GlobalConfig:
     num_outputs: int
     warmup_runs_per_combo: int
     measured_runs_per_combo: int
+    request_connect_timeout_sec: int
     request_timeout_sec: int
+    request_retry_count: int
+    request_retry_backoff_sec: float
     inter_run_sleep_sec: float
     seed_base: int
     use_fixed_seed: bool
@@ -86,7 +90,10 @@ def build_global_config(cfg: dict[str, Any], model_override: str) -> GlobalConfi
         num_outputs=int(g.get("num_outputs", 1)),
         warmup_runs_per_combo=int(g.get("warmup_runs_per_combo", 1)),
         measured_runs_per_combo=int(g.get("measured_runs_per_combo", 5)),
+        request_connect_timeout_sec=int(g.get("request_connect_timeout_sec", 10)),
         request_timeout_sec=int(g.get("request_timeout_sec", 1800)),
+        request_retry_count=int(g.get("request_retry_count", 2)),
+        request_retry_backoff_sec=float(g.get("request_retry_backoff_sec", 1.0)),
         inter_run_sleep_sec=float(g.get("inter_run_sleep_sec", 0)),
         seed_base=int(g.get("seed_base", 1234)),
         use_fixed_seed=bool(g.get("use_fixed_seed", False)),
@@ -250,52 +257,92 @@ def build_payload(global_cfg: GlobalConfig, size: str, steps: int, seed: int) ->
     return json.dumps(payload, ensure_ascii=True).encode("utf-8")
 
 
-def request_once(endpoint: str, payload: bytes, timeout_sec: int) -> tuple[str, float, str]:
-    # Use curl subprocess instead of urllib to avoid long, opaque hangs on some NPU environments.
-    start = time.monotonic()
-    cmd = [
-        "curl",
-        "-sS",
-        "-X",
-        "POST",
-        endpoint,
-        "-H",
-        "Content-Type: application/json",
-        "--max-time",
-        str(timeout_sec),
-        "--data-binary",
-        payload.decode("utf-8"),
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code},%{time_total}",
-    ]
+def probe_tcp(host: str, port: int, timeout_sec: int) -> bool:
     try:
-        result = subprocess.run(  # noqa: S603
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=max(timeout_sec + 5, 10),
-            check=False,
-        )
-        latency = time.monotonic() - start
+        with socket.create_connection((host, port), timeout=timeout_sec):
+            return True
+    except OSError:
+        return False
 
-        output = (result.stdout or "").strip()
-        if output:
-            parts = output.split(",", 1)
-            if len(parts) == 2:
-                http_code = parts[0].strip() or "000"
-                return http_code, latency, "" if http_code == "200" else f"http-{http_code}"
 
-        if result.returncode == 28:
-            return "000", latency, "request-timeout"
-        return "000", latency, "request-error"
-    except subprocess.TimeoutExpired:
-        latency = time.monotonic() - start
-        return "000", latency, "request-timeout"
-    except Exception:
-        latency = time.monotonic() - start
-        return "000", latency, "request-error"
+def request_once(
+    endpoint: str,
+    payload: bytes,
+    timeout_sec: int,
+    connect_timeout_sec: int,
+    retry_count: int,
+    retry_backoff_sec: float,
+) -> tuple[str, float, str]:
+    # Use curl subprocess instead of urllib to avoid long, opaque hangs on some NPU environments.
+    attempts = max(1, retry_count + 1)
+    last_latency = 0.0
+    last_err = "request-error"
+
+    for attempt in range(1, attempts + 1):
+        start = time.monotonic()
+        cmd = [
+            "curl",
+            "-sS",
+            "-X",
+            "POST",
+            endpoint,
+            "--noproxy",
+            "*",
+            "--connect-timeout",
+            str(connect_timeout_sec),
+            "--max-time",
+            str(timeout_sec),
+            "-H",
+            "Content-Type: application/json",
+            "-H",
+            "Connection: close",
+            "--data-binary",
+            payload.decode("utf-8"),
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code},%{time_total}",
+        ]
+
+        try:
+            result = subprocess.run(  # noqa: S603
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=max(timeout_sec + connect_timeout_sec + 5, 15),
+                check=False,
+            )
+            latency = time.monotonic() - start
+            last_latency = latency
+
+            output = (result.stdout or "").strip()
+            if result.returncode == 0 and output:
+                parts = output.split(",", 1)
+                if len(parts) == 2:
+                    http_code = parts[0].strip() or "000"
+                    return http_code, latency, "" if http_code == "200" else f"http-{http_code}"
+
+            if result.returncode == 28:
+                last_err = "request-timeout"
+            elif result.returncode == 7:
+                last_err = "connect-failed"
+            elif result.returncode == 6:
+                last_err = "resolve-failed"
+            else:
+                last_err = "request-error"
+        except subprocess.TimeoutExpired:
+            latency = time.monotonic() - start
+            last_latency = latency
+            last_err = "request-timeout"
+        except Exception:
+            latency = time.monotonic() - start
+            last_latency = latency
+            last_err = "request-error"
+
+        if attempt < attempts:
+            time.sleep(retry_backoff_sec)
+
+    return "000", last_latency, last_err
 
 
 def sanitize_name(name: str) -> str:
@@ -444,11 +491,19 @@ def run_case(summary_csv: Path, run_root: Path, global_cfg: GlobalConfig, case: 
 
                 seed = global_cfg.seed_base if global_cfg.use_fixed_seed else (global_cfg.seed_base + w)
                 payload = build_payload(global_cfg, size, steps, seed)
+                tcp_ok = probe_tcp(global_cfg.host, global_cfg.port, global_cfg.request_connect_timeout_sec)
                 print(
                     f"    sending warmup request {w}/{global_cfg.warmup_runs_per_combo} "
-                    f"(seed={seed}, timeout={global_cfg.request_timeout_sec}s)"
+                    f"(seed={seed}, timeout={global_cfg.request_timeout_sec}s, tcp_ready={tcp_ok})"
                 )
-                http_code, latency_s, err = request_once(infer_url, payload, global_cfg.request_timeout_sec)
+                http_code, latency_s, err = request_once(
+                    infer_url,
+                    payload,
+                    global_cfg.request_timeout_sec,
+                    global_cfg.request_connect_timeout_sec,
+                    global_cfg.request_retry_count,
+                    global_cfg.request_retry_backoff_sec,
+                )
 
                 status = "PASS" if http_code == "200" else "FAIL"
                 if status == "FAIL":
@@ -533,11 +588,19 @@ def run_case(summary_csv: Path, run_root: Path, global_cfg: GlobalConfig, case: 
                     else (global_cfg.seed_base + global_cfg.warmup_runs_per_combo + run_idx)
                 )
                 payload = build_payload(global_cfg, size, steps, seed)
+                tcp_ok = probe_tcp(global_cfg.host, global_cfg.port, global_cfg.request_connect_timeout_sec)
                 print(
                     f"    sending measure request {run_idx}/{global_cfg.measured_runs_per_combo} "
-                    f"(seed={seed}, timeout={global_cfg.request_timeout_sec}s)"
+                    f"(seed={seed}, timeout={global_cfg.request_timeout_sec}s, tcp_ready={tcp_ok})"
                 )
-                http_code, latency_s, err = request_once(infer_url, payload, global_cfg.request_timeout_sec)
+                http_code, latency_s, err = request_once(
+                    infer_url,
+                    payload,
+                    global_cfg.request_timeout_sec,
+                    global_cfg.request_connect_timeout_sec,
+                    global_cfg.request_retry_count,
+                    global_cfg.request_retry_backoff_sec,
+                )
                 status = "PASS" if http_code == "200" else "FAIL"
                 if status == "FAIL":
                     combo_note = err or f"http-{http_code}"
