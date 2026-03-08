@@ -11,6 +11,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+# python profile/videoGen/run_video_parallel_bench.py --request-types-config /home/mumura/omni/vllm-omni/profile/videoGen/test_req.json   --card-counts 1,2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 1 --request-timeout-seconds 200 --warmup-timeout-seconds 300 --timeout-grace-seconds 20 
+
 
 DEFAULT_MODEL = "/data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers"
 
@@ -194,14 +196,18 @@ def load_parallel_configs(path: Path, selected_cards: set[int]) -> list[Parallel
                 ring_degree=int(cfg["ring_degree"]),
                 cfg_parallel_size=int(cfg["cfg_parallel_size"]),
                 use_hsdp=bool(cfg.get("use_hsdp", False)),
-                hsdp_shard_size=(
-                    int(cfg["hsdp_shard_size"]), -1
-                ),
+                hsdp_shard_size=int(cfg.get("hsdp_shard_size", -1)),
                 hsdp_replicate_size=int(cfg.get("hsdp_replicate_size", 1)),
             )
 
-            other_world_size = item.world_size
-            expected_world_size = other_world_size
+            core_world_size = item.world_size
+            expected_world_size = core_world_size
+
+            if not item.use_hsdp and core_world_size != num_gpus:
+                raise ValueError(
+                    f"Invalid config {item.name}: TP*USP*CFG={core_world_size}, "
+                    f"expected {num_gpus}."
+                )
 
             if item.use_hsdp:
                 if item.tensor_parallel_size != 1:
@@ -215,43 +221,45 @@ def load_parallel_configs(path: Path, selected_cards: set[int]) -> list[Parallel
                         f"got {item.hsdp_replicate_size}."
                     )
 
-                shard_size = item.hsdp_shard_size if item.hsdp_shard_size is not None else -1
+                shard_size = item.hsdp_shard_size
                 if shard_size == -1:
-                    if other_world_size == 1:
+                    if core_world_size == 1:
                         raise ValueError(
                             f"Invalid config {item.name}: cannot auto-calculate hsdp_shard_size "
                             "when TP/SP/CFG are all 1; please set hsdp_shard_size explicitly."
                         )
-                    if other_world_size % item.hsdp_replicate_size != 0:
+                    if core_world_size % item.hsdp_replicate_size != 0:
                         raise ValueError(
                             f"Invalid config {item.name}: hsdp_replicate_size={item.hsdp_replicate_size} "
-                            f"must divide world_size={other_world_size}."
+                            f"must divide TP*USP*CFG world_size={core_world_size}."
                         )
-                    expected_world_size = other_world_size
+                    hsdp_world_size = core_world_size
                 else:
                     if shard_size <= 0:
                         raise ValueError(
                             f"Invalid config {item.name}: hsdp_shard_size must be > 0 or -1, got {shard_size}."
                         )
                     hsdp_world_size = shard_size * item.hsdp_replicate_size
-                    if other_world_size == 1:
-                        expected_world_size = hsdp_world_size
-                    else:
-                        if hsdp_world_size != other_world_size:
-                            raise ValueError(
-                                f"Invalid config {item.name}: HSDP dimensions "
-                                f"({item.hsdp_replicate_size}x{shard_size}={hsdp_world_size}) "
-                                f"must equal TP/SP/CFG world_size ({other_world_size})."
-                            )
-                        expected_world_size = other_world_size
+
+                if core_world_size == 1:
+                    expected_world_size = hsdp_world_size
+                else:
+                    if hsdp_world_size != core_world_size:
+                        raise ValueError(
+                            f"Invalid config {item.name}: HSDP dimensions "
+                            f"({item.hsdp_replicate_size}x{shard_size}={hsdp_world_size}) "
+                            f"must equal TP*USP*CFG world_size ({core_world_size})."
+                        )
+                    expected_world_size = core_world_size
 
             if expected_world_size != num_gpus:
                 raise ValueError(
                     f"Invalid config {item.name}: world_size={expected_world_size}, expected {num_gpus}."
                 )
-            if item.vae_patch_parallel_size != num_gpus:
+            if item.vae_patch_parallel_size not in (1, num_gpus):
                 raise ValueError(
-                    f"Invalid config {item.name}: vae_patch_parallel_size={item.vae_patch_parallel_size}, expected {num_gpus}."
+                    f"Invalid config {item.name}: vae_patch_parallel_size={item.vae_patch_parallel_size}, "
+                    f"expected 1 or {num_gpus}."
                 )
             configs.append(item)
     configs.sort(key=lambda x: (x.num_gpus, x.name))
@@ -321,7 +329,7 @@ def build_worker_cmd(
         cmd.extend(["--timeout-grace-seconds", str(args.timeout_grace_seconds)])
     if cfg.use_hsdp:
         cmd.append("--use-hsdp")
-        if cfg.hsdp_shard_size is not None:
+        if cfg.hsdp_shard_size > 0:
             cmd.extend(["--hsdp-shard-size", str(cfg.hsdp_shard_size)])
         cmd.extend(["--hsdp-replicate-size", str(cfg.hsdp_replicate_size)])
     if not args.resume:
