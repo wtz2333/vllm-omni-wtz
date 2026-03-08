@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 # python profile/videoGen/run_video_parallel_bench.py --request-types-config /home/mumura/omni/vllm-omni/profile/videoGen/test_req.json   --card-counts 1,2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 1 --request-timeout-seconds 200 --warmup-timeout-seconds 300 --timeout-grace-seconds 20 
+# python profile/videoGen/run_video_parallel_bench.py  --card-counts 2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 3 --request-timeout-seconds 450 --warmup-timeout-seconds 600 --timeout-grace-seconds 20 
 
 
 DEFAULT_MODEL = "/data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers"
@@ -311,10 +312,8 @@ def build_worker_cmd(
         "--vae-patch-parallel-size",
         str(cfg.vae_patch_parallel_size),
     ]
-    if args.vae_use_slicing:
-        cmd.append("--vae-use-slicing")
-    if args.vae_use_tiling:
-        cmd.append("--vae-use-tiling")
+    cmd.append("--vae-use-slicing")
+    cmd.append("--vae-use-tiling")
     if args.enforce_eager:
         cmd.append("--enforce-eager")
     if args.enable_cpu_offload:
@@ -365,6 +364,7 @@ def save_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "run_dir",
         "metrics_json",
         "stdout_log",
+        "is_timeout",
         "status",
         "error",
     ]
@@ -528,6 +528,7 @@ def main() -> None:
                             "run_dir": str(cfg_dir),
                             "metrics_json": str(metrics_json),
                             "stdout_log": str(stdout_log),
+                            "is_timeout": str(item.get("status", "ok")) == "timeout",
                             "status": item.get("status", "ok"),
                             "error": item.get("error", ""),
                         }
@@ -567,6 +568,7 @@ def main() -> None:
                     "run_dir": str(cfg_dir),
                     "metrics_json": str(metrics_json),
                     "stdout_log": str(stdout_log),
+                    "is_timeout": False,
                     "status": "failed",
                     "error": str(exc),
                 }

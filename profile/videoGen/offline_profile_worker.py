@@ -191,6 +191,7 @@ def _save_payload(
     rows = _serialize_rows(rows_by_key, order_map)
     ok_count = sum(1 for r in rows if r.get("status") == "ok")
     failed_count = sum(1 for r in rows if r.get("status") == "failed")
+    timeout_count = sum(1 for r in rows if r.get("status") == "timeout")
     payload = {
         "model": args.model,
         "parallel_name": args.parallel_name,
@@ -201,6 +202,7 @@ def _save_payload(
         "completed_entries": len(rows),
         "completed_ok": ok_count,
         "completed_failed": failed_count,
+        "completed_timeout": timeout_count,
         "warmup_done": warmup_done,
         "warmup_stats": warmup_stats,
         "results": rows,
@@ -323,20 +325,24 @@ def main() -> None:
         "active": False,
         "label": "",
         "start": 0.0,
+        "meta": {},
     }
     request_watch_lock = threading.Lock()
+    save_lock = threading.Lock()
 
-    def mark_request_start(label: str) -> None:
+    def mark_request_start(label: str, meta: dict[str, object] | None = None) -> None:
         with request_watch_lock:
             request_watch_state["active"] = True
             request_watch_state["label"] = label
             request_watch_state["start"] = time.monotonic()
+            request_watch_state["meta"] = dict(meta or {})
 
     def mark_request_end() -> None:
         with request_watch_lock:
             request_watch_state["active"] = False
             request_watch_state["label"] = ""
             request_watch_state["start"] = 0.0
+            request_watch_state["meta"] = {}
 
     def _watchdog_loop() -> None:
         if args.request_timeout_seconds <= 0 and args.warmup_timeout_seconds <= 0:
@@ -347,6 +353,7 @@ def main() -> None:
                 active = bool(request_watch_state["active"])
                 label = str(request_watch_state["label"])
                 start = float(request_watch_state["start"])
+                meta = dict(request_watch_state.get("meta", {}))
             if not active:
                 continue
             timeout_s = args.request_timeout_seconds
@@ -356,6 +363,55 @@ def main() -> None:
                 continue
             elapsed = time.monotonic() - start
             if elapsed > timeout_s:
+                try:
+                    if bool(meta.get("is_warmup", False)):
+                        warmup_stats["request_type_id"] = str(meta.get("request_type_id", ""))
+                        warmup_stats["planned_iters"] = int(args.warmup_iters)
+                        warmup_stats["status"] = "timeout"
+                        warmup_stats["timeout_seconds"] = float(timeout_s)
+                        warmup_stats["timeout_elapsed_seconds"] = float(elapsed)
+                    else:
+                        request_type_id = str(meta.get("request_type_id", ""))
+                        repeat_id = int(meta.get("repeat_id", 0))
+                        key = (request_type_id, repeat_id)
+                        timeout_row = {
+                            "parallel_name": args.parallel_name,
+                            "num_gpus": args.num_gpus,
+                            "tensor_parallel_size": args.tensor_parallel_size,
+                            "ulysses_degree": args.ulysses_degree,
+                            "ring_degree": args.ring_degree,
+                            "cfg_parallel_size": args.cfg_parallel_size,
+                            "vae_patch_parallel_size": args.vae_patch_parallel_size,
+                            "request_type_id": request_type_id,
+                            "height": int(meta.get("height", 0)),
+                            "width": int(meta.get("width", 0)),
+                            "num_frames": int(meta.get("num_frames", 0)),
+                            "num_inference_steps": int(meta.get("num_inference_steps", 0)),
+                            "repeat_id": repeat_id,
+                            "seed": int(meta.get("seed", 0)),
+                            "latency_seconds": float(elapsed),
+                            "latency_ms": float(elapsed * 1000.0),
+                            "status": "timeout",
+                            "error": (
+                                f"request timeout after {timeout_s}s "
+                                f"(elapsed={elapsed:.4f}s)"
+                            ),
+                        }
+                        rows_by_key[key] = timeout_row
+
+                    with save_lock:
+                        _save_payload(
+                            out_path,
+                            args,
+                            rows_by_key,
+                            order_map,
+                            planned_total,
+                            warmup_done,
+                            warmup_stats,
+                        )
+                except Exception as persist_exc:
+                    print(f"[Worker][Timeout] Failed to persist timeout result: {persist_exc}", flush=True)
+
                 print(
                     f"[Worker][Timeout] Request '{label}' exceeded {timeout_s}s "
                     f"(elapsed={elapsed:.1f}s). Sending SIGTERM then SIGKILL (grace={args.timeout_grace_seconds}s).",
@@ -401,7 +457,13 @@ def main() -> None:
         warmup_latencies: list[float] = []
         for warmup_idx in range(args.warmup_iters):
             warmup_label = f"warmup_{warmup_req['request_type_id']}_iter{warmup_idx + 1}"
-            mark_request_start(warmup_label)
+            mark_request_start(
+                warmup_label,
+                {
+                    "is_warmup": True,
+                    "request_type_id": warmup_req["request_type_id"],
+                },
+            )
             try:
                 warmup_latency_s = run_one(
                     omni=omni,
@@ -454,7 +516,19 @@ def main() -> None:
 
             try:
                 req_label = f"{req['request_type_id']}_r{repeat_id}"
-                mark_request_start(req_label)
+                mark_request_start(
+                    req_label,
+                    {
+                        "is_warmup": False,
+                        "request_type_id": req["request_type_id"],
+                        "repeat_id": repeat_id,
+                        "seed": seed,
+                        "height": req["height"],
+                        "width": req["width"],
+                        "num_frames": req["num_frames"],
+                        "num_inference_steps": req["num_inference_steps"],
+                    },
+                )
                 try:
                     latency_s = run_one(
                         omni=omni,
@@ -512,6 +586,21 @@ def main() -> None:
                 }
                 rows_by_key[key] = row
                 print(f"[Worker][Error] {req['request_type_id']} r{repeat_id}: {exc}")
+                with save_lock:
+                    _save_payload(
+                        out_path,
+                        args,
+                        rows_by_key,
+                        order_map,
+                        planned_total,
+                        warmup_done,
+                        warmup_stats,
+                    )
+                if args.request_fail_fast:
+                    raise
+                continue
+
+            with save_lock:
                 _save_payload(
                     out_path,
                     args,
@@ -521,19 +610,6 @@ def main() -> None:
                     warmup_done,
                     warmup_stats,
                 )
-                if args.request_fail_fast:
-                    raise
-                continue
-
-            _save_payload(
-                out_path,
-                args,
-                rows_by_key,
-                order_map,
-                planned_total,
-                warmup_done,
-                warmup_stats,
-            )
 
     print(f"[Worker] Saved: {out_path}")
 
