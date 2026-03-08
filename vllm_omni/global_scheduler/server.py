@@ -4,16 +4,24 @@ import argparse
 import asyncio
 import contextlib
 from contextlib import asynccontextmanager
+import asyncio
+import contextlib
+from contextlib import asynccontextmanager
 from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from pydantic import BaseModel
 
 from vllm_omni.version import __version__
 
 from .config import GlobalSchedulerConfig, load_config
+from .lifecycle import InstanceLifecycleManager
+from .state import RuntimeStateStore
+from .types import InstanceSpec
 from .lifecycle import InstanceLifecycleManager
 from .state import RuntimeStateStore
 from .types import InstanceSpec
@@ -118,6 +126,14 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
     app.state.instance_lifecycle_manager = InstanceLifecycleManager(instance_specs)
     app.state.config_loader = config_loader
     app.state.health_probe_task = None
+    instance_specs = _to_instance_specs(config)
+    app.state.runtime_state_store = RuntimeStateStore(
+        instances=instance_specs,
+        ewma_alpha=config.scheduler.ewma_alpha,
+    )
+    app.state.instance_lifecycle_manager = InstanceLifecycleManager(instance_specs)
+    app.state.config_loader = config_loader
+    app.state.health_probe_task = None
 
     @app.get("/health")
     async def health() -> JSONResponse:
@@ -212,6 +228,7 @@ def run_server(config_path: str) -> None:
         config_path: Path to scheduler YAML config.
     """
     config = load_config(config_path)
+    app = create_app(config, config_loader=lambda: load_config(config_path))
     app = create_app(config, config_loader=lambda: load_config(config_path))
     uvicorn.run(app, host=config.server.host, port=config.server.port)
 
