@@ -62,6 +62,64 @@ class PolicyConfig(BaseModel):
     baseline: BaselinePolicyConfig = Field(default_factory=BaselinePolicyConfig)
 
 
+class LaunchConfig(BaseModel):
+    """Structured launch config for `vllm serve` command generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    executable: str = "vllm"
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("model", "executable")
+    @classmethod
+    def validate_non_empty_str(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("launch.model and launch.executable cannot be empty")
+        return value
+
+    @field_validator("args")
+    @classmethod
+    def validate_args(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item.strip():
+                raise ValueError("launch.args cannot include empty items")
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def validate_env(cls, value: dict[str, str]) -> dict[str, str]:
+        for key in value:
+            if not key.strip():
+                raise ValueError("launch.env keys cannot be empty")
+        return value
+
+
+class StopConfig(BaseModel):
+    """Structured stop command config for one instance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    executable: str = "pkill"
+    args: list[str] = Field(default_factory=list)
+
+    @field_validator("executable")
+    @classmethod
+    def validate_executable(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("stop.executable cannot be empty")
+        return value
+
+    @field_validator("args")
+    @classmethod
+    def validate_stop_args(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item.strip():
+                raise ValueError("stop.args cannot include empty items")
+        return value
+
+
 class InstanceConfig(BaseModel):
     """Static upstream instance configuration entry."""
 
@@ -71,9 +129,8 @@ class InstanceConfig(BaseModel):
     endpoint: str
     sp_size: int = 1
     max_concurrency: int = Field(default=1, ge=1)
-    start_command: str | None = None
-    stop_command: str | None = None
-    restart_command: str | None = None
+    launch: LaunchConfig | None = None
+    stop: StopConfig | None = None
 
     @field_validator("id")
     @classmethod
@@ -100,15 +157,6 @@ class InstanceConfig(BaseModel):
         if parsed.path not in {"", "/"}:
             raise ValueError("instances[].endpoint must not include path")
         return value.rstrip("/")
-
-    @field_validator("start_command", "stop_command", "restart_command")
-    @classmethod
-    def validate_commands(cls, value: str | None) -> str | None:
-        if value is None:
-            return value
-        if not value.strip():
-            raise ValueError("instances[] lifecycle commands cannot be empty")
-        return value
 
 
 class GlobalSchedulerConfig(BaseModel):

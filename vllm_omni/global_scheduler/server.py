@@ -242,9 +242,12 @@ def _to_instance_specs(config: GlobalSchedulerConfig) -> list[InstanceSpec]:
             endpoint=instance.endpoint,
             sp_size=instance.sp_size,
             max_concurrency=instance.max_concurrency,
-            start_command=instance.start_command,
-            stop_command=instance.stop_command,
-            restart_command=instance.restart_command,
+            launch_executable=instance.launch.executable if instance.launch is not None else None,
+            launch_model=instance.launch.model if instance.launch is not None else None,
+            launch_args=list(instance.launch.args) if instance.launch is not None else [],
+            launch_env=dict(instance.launch.env) if instance.launch is not None else {},
+            stop_executable=instance.stop.executable if instance.stop is not None else None,
+            stop_args=list(instance.stop.args) if instance.stop is not None else [],
         )
         for instance in config.instances
     ]

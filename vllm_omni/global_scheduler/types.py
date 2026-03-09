@@ -33,9 +33,12 @@ class InstanceSpec:
     endpoint: str
     sp_size: int = 1
     max_concurrency: int = 1
-    start_command: str | None = None
-    stop_command: str | None = None
-    restart_command: str | None = None
+    launch_executable: str | None = None
+    launch_model: str | None = None
+    launch_args: list[str] = field(default_factory=list)
+    launch_env: dict[str, str] = field(default_factory=dict)
+    stop_executable: str | None = None
+    stop_args: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

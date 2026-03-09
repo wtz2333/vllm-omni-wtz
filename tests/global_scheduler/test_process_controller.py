@@ -13,11 +13,11 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_local_process_controller_requires_command():
-    """Missing command should raise LifecycleUnsupportedError."""
+    """Missing launch config should raise LifecycleUnsupportedError."""
     controller = LocalProcessController()
     instance = InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001")
 
-    with pytest.raises(LifecycleUnsupportedError, match="not configured"):
+    with pytest.raises(LifecycleUnsupportedError, match="launch config not provided"):
         controller.start(instance)
 
 
@@ -27,10 +27,14 @@ def test_local_process_controller_exec_error():
     instance = InstanceSpec(
         id="worker-0",
         endpoint="http://127.0.0.1:9001",
-        restart_command='sh -c "echo boom 1>&2; exit 7"',
+        stop_executable="sh",
+        stop_args=["-c", "echo boom 1>&2; exit 7"],
+        launch_executable="sh",
+        launch_model="ignored-model",
+        launch_args=["-c", "exit 0"],
     )
 
-    with pytest.raises(LifecycleExecutionError, match="restart failed"):
+    with pytest.raises(LifecycleExecutionError, match="stop failed"):
         controller.restart(instance)
 
 
@@ -40,7 +44,22 @@ def test_local_process_controller_success_command():
     instance = InstanceSpec(
         id="worker-0",
         endpoint="http://127.0.0.1:9001",
-        stop_command='sh -c "exit 0"',
+        stop_executable="sh",
+        stop_args=["-c", "exit 0"],
     )
 
     controller.stop(instance)
+
+
+def test_local_process_controller_start_with_structured_launch():
+    """Start should execute structured launch command with endpoint port."""
+    controller = LocalProcessController()
+    instance = InstanceSpec(
+        id="worker-0",
+        endpoint="http://127.0.0.1:9001",
+        launch_executable="true",
+        launch_model="ignored-model",
+        launch_args=["--ulysses-degree", "2"],
+    )
+
+    controller.start(instance)

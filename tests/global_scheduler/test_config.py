@@ -201,8 +201,8 @@ def test_load_config_legacy_mode_key_is_rejected(tmp_path):
         load_config(config_path)
 
 
-def test_load_config_instance_lifecycle_commands_success(tmp_path):
-    """Lifecycle command fields should be accepted when non-empty."""
+def test_load_config_instance_lifecycle_structured_fields_success(tmp_path):
+    """Structured launch/stop fields should be accepted."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -212,9 +212,15 @@ def test_load_config_instance_lifecycle_commands_success(tmp_path):
                 endpoint: http://127.0.0.1:9001
                 sp_size: 1
                 max_concurrency: 2
-                start_command: "echo start"
-                stop_command: "echo stop"
-                restart_command: "echo restart"
+                launch:
+                  model: Qwen/Qwen-Image
+                  executable: vllm
+                  args: ["--omni", "--ulysses-degree", "2"]
+                  env:
+                    CUDA_VISIBLE_DEVICES: "0,1"
+                stop:
+                  executable: pkill
+                  args: ["-f", "vllm serve Qwen/Qwen-Image --port 9001"]
             """
         ),
         encoding="utf-8",
@@ -222,13 +228,16 @@ def test_load_config_instance_lifecycle_commands_success(tmp_path):
 
     config = load_config(config_path)
 
-    assert config.instances[0].start_command == "echo start"
-    assert config.instances[0].stop_command == "echo stop"
-    assert config.instances[0].restart_command == "echo restart"
+    assert config.instances[0].launch is not None
+    assert config.instances[0].launch.model == "Qwen/Qwen-Image"
+    assert config.instances[0].launch.args == ["--omni", "--ulysses-degree", "2"]
+    assert config.instances[0].launch.env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert config.instances[0].stop is not None
+    assert config.instances[0].stop.args[0] == "-f"
 
 
-def test_load_config_empty_lifecycle_command_rejected(tmp_path):
-    """Lifecycle command field should reject blank strings."""
+def test_load_config_empty_launch_arg_rejected(tmp_path):
+    """Structured launch args should reject blank items."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -238,11 +247,13 @@ def test_load_config_empty_lifecycle_command_rejected(tmp_path):
                 endpoint: http://127.0.0.1:9001
                 sp_size: 1
                 max_concurrency: 2
-                start_command: "   "
+                launch:
+                  model: Qwen/Qwen-Image
+                  args: ["--omni", "   "]
             """
         ),
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="lifecycle commands cannot be empty"):
+    with pytest.raises(ValueError, match="launch.args cannot include empty items"):
         load_config(config_path)
