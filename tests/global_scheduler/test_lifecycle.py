@@ -102,3 +102,17 @@ def test_user_disabled_instance_is_kept_after_drain_converges():
     assert "worker-1" in final
     assert final["worker-1"].enabled is False
     assert final["worker-1"].draining is False
+
+
+def test_non_running_process_state_is_excluded_from_routable_set():
+    """Instances in non-running process states must not be routed."""
+    manager = InstanceLifecycleManager(_instances())
+
+    manager.set_process_state("worker-0", process_state="restarting", operation="restart")
+    routable_ids = [item.id for item in manager.get_routable_instances()]
+    assert routable_ids == ["worker-1"]
+
+    snapshot = manager.snapshot()
+    assert snapshot["worker-0"].process_state == "restarting"
+    assert snapshot["worker-0"].last_operation == "restart"
+    assert snapshot["worker-0"].last_operation_ts_s is not None

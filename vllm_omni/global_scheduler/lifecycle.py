@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 from .types import InstanceSpec, RuntimeStats
 
+PROCESS_STATES = {"running", "stopped", "stopping", "starting", "restarting", "error"}
+
 
 @dataclass(slots=True)
 class InstanceLifecycleStatus:
@@ -17,6 +19,10 @@ class InstanceLifecycleStatus:
     enabled: bool = True
     healthy: bool = True
     draining: bool = False
+    process_state: str = "running"
+    last_operation: str = "none"
+    last_operation_ts_s: float | None = None
+    last_operation_error: str | None = None
     last_check_ts_s: float | None = None
     last_error: str | None = None
 
@@ -51,6 +57,10 @@ class InstanceLifecycleManager:
                     enabled=status.enabled,
                     healthy=status.healthy,
                     draining=status.draining,
+                    process_state=status.process_state,
+                    last_operation=status.last_operation,
+                    last_operation_ts_s=status.last_operation_ts_s,
+                    last_operation_error=status.last_operation_error,
                     last_check_ts_s=status.last_check_ts_s,
                     last_error=status.last_error,
                 )
@@ -67,8 +77,27 @@ class InstanceLifecycleManager:
             return [
                 status.instance
                 for status in self._instances.values()
-                if status.enabled and status.healthy and not status.draining
+                if status.enabled and status.healthy and not status.draining and status.process_state == "running"
             ]
+
+    def set_process_state(
+        self,
+        instance_id: str,
+        process_state: str,
+        operation: str | None = None,
+        error: str | None = None,
+    ) -> InstanceLifecycleStatus:
+        """Update process lifecycle state for one instance."""
+        if process_state not in PROCESS_STATES:
+            raise ValueError(f"invalid process_state: {process_state}")
+        with self._lock:
+            status = self._get_status(instance_id)
+            status.process_state = process_state
+            if operation is not None:
+                status.last_operation = operation
+                status.last_operation_ts_s = time.time()
+            status.last_operation_error = error
+            return self._copy_status(status)
 
     def set_enabled(self, instance_id: str, enabled: bool) -> InstanceLifecycleStatus:
         """Set operator enabled flag for an instance.
@@ -196,6 +225,10 @@ class InstanceLifecycleManager:
             enabled=status.enabled,
             healthy=status.healthy,
             draining=status.draining,
+            process_state=status.process_state,
+            last_operation=status.last_operation,
+            last_operation_ts_s=status.last_operation_ts_s,
+            last_operation_error=status.last_operation_error,
             last_check_ts_s=status.last_check_ts_s,
             last_error=status.last_error,
         )
