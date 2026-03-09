@@ -1,5 +1,6 @@
 """Scheduler server endpoint and lifecycle API tests."""
 
+from collections.abc import AsyncIterator
 import textwrap
 
 import pytest
@@ -364,6 +365,103 @@ def test_chat_completions_error_semantics_and_state_cleanup(tmp_path, monkeypatc
     assert payload["error"]["code"] == error_code
     assert payload["error"]["request_id"] == "req-error"
     assert response.headers["X-Routed-Instance"] == "worker-0"
+
+    snapshot = app.state.runtime_state_store.snapshot()
+    assert snapshot["worker-0"].queue_len == 0
+    assert snapshot["worker-0"].inflight == 0
+
+
+def test_chat_completions_unexpected_exception_still_cleans_state(tmp_path, monkeypatch):
+    """Unexpected proxy exceptions should still release runtime counters."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              request_timeout_s: 3
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+                sp_size: 1
+                max_concurrency: 1
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    app = create_app(config)
+
+    def _fake_proxy(*_args, **_kwargs):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr("vllm_omni.global_scheduler.server._proxy_chat_completion", _fake_proxy)
+
+    # Keep server exception inside HTTP 500 response to assert post-state.
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-request-id": "req-unexpected"},
+        json={"model": "demo", "messages": []},
+    )
+
+    assert response.status_code == 500
+    snapshot = app.state.runtime_state_store.snapshot()
+    assert snapshot["worker-0"].queue_len == 0
+    assert snapshot["worker-0"].inflight == 0
+
+
+def test_chat_completions_streaming_passthrough_and_state_cleanup(tmp_path, monkeypatch):
+    """Stream path should passthrough upstream metadata and cleanup counters."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              request_timeout_s: 3
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+                sp_size: 1
+                max_concurrency: 1
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    app = create_app(config)
+
+    async def _fake_stream() -> AsyncIterator[bytes]:
+        yield b"data: part-1\n\n"
+        yield b"data: [DONE]\n\n"
+
+    async def _fake_open_streaming_upstream(*_args, **_kwargs):
+        return (
+            200,
+            {"x-upstream-header": "ok", "content-type": "text/event-stream"},
+            "text/event-stream",
+            _fake_stream(),
+        )
+
+    monkeypatch.setattr(
+        "vllm_omni.global_scheduler.server._open_streaming_upstream",
+        _fake_open_streaming_upstream,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-request-id": "req-stream"},
+        json={"model": "demo", "messages": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-upstream-header"] == "ok"
+    assert response.headers["X-Routed-Instance"] == "worker-0"
+    assert "data: part-1" in response.text
+    assert "data: [DONE]" in response.text
 
     snapshot = app.state.runtime_state_store.snapshot()
     assert snapshot["worker-0"].queue_len == 0

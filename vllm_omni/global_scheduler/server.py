@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import json
 import socket
@@ -12,10 +13,10 @@ from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from vllm_omni.version import __version__
@@ -33,6 +34,14 @@ class UpstreamHTTPError(Exception):
     def __init__(self, status_code: int, body: bytes) -> None:
         self.status_code = status_code
         self.body = body
+
+
+class UpstreamResult(BaseModel):
+    """Upstream HTTP response payload used by non-stream proxy path."""
+
+    status_code: int
+    body: bytes
+    headers: dict[str, str]
 
 
 def _build_error_payload(code: str, message: str, request_id: str) -> dict[str, Any]:
@@ -94,7 +103,7 @@ def _proxy_chat_completion(
     body: bytes,
     headers: dict[str, str],
     timeout_s: int,
-) -> bytes:
+) -> UpstreamResult:
     """Forward chat completion request to one upstream endpoint.
 
     Args:
@@ -104,7 +113,7 @@ def _proxy_chat_completion(
         timeout_s: Upstream request timeout in seconds.
 
     Returns:
-        Raw response body from upstream on success.
+        Upstream status/body/headers on success.
 
     Raises:
         TimeoutError: Upstream timeout.
@@ -116,7 +125,11 @@ def _proxy_chat_completion(
 
     try:
         with urllib_request.urlopen(request, timeout=timeout_s) as upstream_response:  # noqa: S310
-            return upstream_response.read()
+            return UpstreamResult(
+                status_code=upstream_response.status,
+                body=upstream_response.read(),
+                headers={key: value for key, value in upstream_response.headers.items()},
+            )
     except urllib_error.HTTPError as exc:
         raise UpstreamHTTPError(status_code=exc.code, body=exc.read()) from exc
     except urllib_error.URLError as exc:
@@ -126,6 +139,56 @@ def _proxy_chat_completion(
         raise OSError(f"upstream network error: {reason}") from exc
     except (socket.timeout, TimeoutError) as exc:
         raise TimeoutError("upstream request timed out") from exc
+
+
+def _select_upstream_response_headers(headers: Any) -> dict[str, str]:
+    """Select safe upstream headers for downstream passthrough."""
+    blocked = {"content-length", "transfer-encoding", "connection", "keep-alive"}
+    return {key: value for key, value in headers.items() if key.lower() not in blocked}
+
+
+async def _open_streaming_upstream(
+    endpoint: str,
+    body: bytes,
+    headers: dict[str, str],
+    timeout_s: int,
+) -> tuple[int, dict[str, str], str | None, AsyncIterator[bytes]]:
+    """Open upstream event stream and expose status/headers/body iterator."""
+    url = f"{endpoint}/v1/chat/completions"
+    timeout = httpx.Timeout(timeout=timeout_s)
+    client = httpx.AsyncClient(timeout=timeout)
+    stream_ctx = client.stream("POST", url=url, content=body, headers=headers)
+    try:
+        upstream_response = await stream_ctx.__aenter__()
+    except httpx.TimeoutException as exc:
+        await client.aclose()
+        raise TimeoutError("upstream request timed out") from exc
+    except httpx.HTTPError as exc:
+        await client.aclose()
+        raise OSError(f"upstream network error: {exc}") from exc
+
+    if upstream_response.status_code >= 400:
+        try:
+            body_bytes = await upstream_response.aread()
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+            await client.aclose()
+        raise UpstreamHTTPError(status_code=upstream_response.status_code, body=body_bytes)
+
+    status_code = upstream_response.status_code
+    response_headers = _select_upstream_response_headers(upstream_response.headers)
+    media_type = upstream_response.headers.get("content-type")
+
+    async def _body_iter() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in upstream_response.aiter_bytes():
+                if chunk:
+                    yield chunk
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
+            await client.aclose()
+
+    return status_code, response_headers, media_type, _body_iter()
 
 
 def _build_health_payload(config: Any) -> tuple[int, dict[str, Any]]:
@@ -358,27 +421,121 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
         app.state.runtime_state_store.on_request_start(decision.instance_id)
         started_at = time.monotonic()
         current_config = getattr(app.state, "global_scheduler_config", config)
+        filtered_headers = _filter_forward_headers(request.headers)
+        payload_bytes = json.dumps(payload).encode("utf-8")
+        is_stream = isinstance(payload, dict) and bool(payload.get("stream"))
+
+        def _attach_route_headers(resp: Response) -> Response:
+            resp.headers["X-Routed-Instance"] = decision.instance_id
+            resp.headers["X-Route-Reason"] = decision.reason
+            resp.headers["X-Route-Score"] = str(decision.score)
+            return resp
+
+        if is_stream:
+            ok = False
+            try:
+                status_code, upstream_headers, upstream_media_type, body_iter = await _open_streaming_upstream(
+                    decision.endpoint,
+                    payload_bytes,
+                    filtered_headers,
+                    current_config.server.request_timeout_s,
+                )
+                ok = True
+            except UpstreamHTTPError as exc:
+                app.state.runtime_state_store.on_request_finish(
+                    decision.instance_id,
+                    latency_s=time.monotonic() - started_at,
+                    ok=False,
+                )
+                return _attach_route_headers(
+                    JSONResponse(
+                        status_code=exc.status_code,
+                        content=_build_error_payload(
+                            code="GS_UPSTREAM_HTTP_ERROR",
+                            message=f"Upstream returned HTTP {exc.status_code}",
+                            request_id=request_id,
+                        ),
+                    )
+                )
+            except TimeoutError:
+                app.state.runtime_state_store.on_request_finish(
+                    decision.instance_id,
+                    latency_s=time.monotonic() - started_at,
+                    ok=False,
+                )
+                return _attach_route_headers(
+                    JSONResponse(
+                        status_code=502,
+                        content=_build_error_payload(
+                            code="GS_UPSTREAM_TIMEOUT",
+                            message="Upstream request timed out",
+                            request_id=request_id,
+                        ),
+                    )
+                )
+            except OSError as exc:
+                app.state.runtime_state_store.on_request_finish(
+                    decision.instance_id,
+                    latency_s=time.monotonic() - started_at,
+                    ok=False,
+                )
+                return _attach_route_headers(
+                    JSONResponse(
+                        status_code=502,
+                        content=_build_error_payload(
+                            code="GS_UPSTREAM_NETWORK_ERROR",
+                            message=str(exc),
+                            request_id=request_id,
+                        ),
+                    )
+                )
+
+            async def _tracked_stream() -> AsyncIterator[bytes]:
+                stream_ok = ok
+                try:
+                    async for chunk in body_iter:
+                        yield chunk
+                except Exception:
+                    stream_ok = False
+                    raise
+                finally:
+                    app.state.runtime_state_store.on_request_finish(
+                        decision.instance_id,
+                        latency_s=time.monotonic() - started_at,
+                        ok=stream_ok,
+                    )
+
+            response = StreamingResponse(
+                _tracked_stream(),
+                status_code=status_code,
+                media_type=upstream_media_type or "text/event-stream",
+            )
+            for key, value in upstream_headers.items():
+                response.headers[key] = value
+            return _attach_route_headers(response)
+
         response: Response
+        ok = False
         try:
-            response_body = await asyncio.to_thread(
+            upstream_result = await asyncio.to_thread(
                 _proxy_chat_completion,
                 decision.endpoint,
-                json.dumps(payload).encode("utf-8"),
-                _filter_forward_headers(request.headers),
+                payload_bytes,
+                filtered_headers,
                 current_config.server.request_timeout_s,
             )
-            response = Response(status_code=200, content=response_body, media_type="application/json")
-            app.state.runtime_state_store.on_request_finish(
-                decision.instance_id,
-                latency_s=time.monotonic() - started_at,
-                ok=True,
-            )
+            if isinstance(upstream_result, bytes):
+                response = Response(status_code=200, content=upstream_result, media_type="application/json")
+            else:
+                response = Response(
+                    status_code=upstream_result.status_code,
+                    content=upstream_result.body,
+                    media_type=upstream_result.headers.get("content-type") or "application/json",
+                )
+                for key, value in _select_upstream_response_headers(upstream_result.headers).items():
+                    response.headers[key] = value
+            ok = True
         except UpstreamHTTPError as exc:
-            app.state.runtime_state_store.on_request_finish(
-                decision.instance_id,
-                latency_s=time.monotonic() - started_at,
-                ok=False,
-            )
             response = JSONResponse(
                 status_code=exc.status_code,
                 content=_build_error_payload(
@@ -388,11 +545,6 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
                 ),
             )
         except TimeoutError:
-            app.state.runtime_state_store.on_request_finish(
-                decision.instance_id,
-                latency_s=time.monotonic() - started_at,
-                ok=False,
-            )
             response = JSONResponse(
                 status_code=502,
                 content=_build_error_payload(
@@ -402,11 +554,6 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
                 ),
             )
         except OSError as exc:
-            app.state.runtime_state_store.on_request_finish(
-                decision.instance_id,
-                latency_s=time.monotonic() - started_at,
-                ok=False,
-            )
             response = JSONResponse(
                 status_code=502,
                 content=_build_error_payload(
@@ -415,11 +562,14 @@ def create_app(config: GlobalSchedulerConfig, config_loader: Any = None) -> Fast
                     request_id=request_id,
                 ),
             )
+        finally:
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
+                ok=ok,
+            )
 
-        response.headers["X-Routed-Instance"] = decision.instance_id
-        response.headers["X-Route-Reason"] = decision.reason
-        response.headers["X-Route-Score"] = str(decision.score)
-        return response
+        return _attach_route_headers(response)
 
     return app
 
