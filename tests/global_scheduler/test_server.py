@@ -482,6 +482,7 @@ def test_instance_lifecycle_ops_endpoints_update_process_state(tmp_path):
     stop_resp = client.post("/instances/worker-0/stop")
     assert stop_resp.status_code == 200
     assert stop_resp.json()["process_state"] == "stopped"
+    assert stop_resp.json()["log_path"].endswith("worker-0.log")
 
     start_resp = client.post("/instances/worker-0/start")
     assert start_resp.status_code == 200
@@ -495,6 +496,38 @@ def test_instance_lifecycle_ops_endpoints_update_process_state(tmp_path):
     instance_view = client.get("/instances").json()["instances"][0]
     assert instance_view["process_state"] == "running"
     assert instance_view["last_operation"] == "restart"
+    assert instance_view["log_path"].endswith("worker-0.log")
+
+
+def test_lifecycle_start_is_idempotent_when_already_running(tmp_path):
+    """Second start on running instance should be a no-op."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    controller = _FakeProcessController()
+    config = load_config(config_path)
+    app = create_app(config, process_controller=controller)
+    client = TestClient(app)
+
+    first = client.post("/instances/worker-0/start")
+    assert first.status_code == 200
+
+    second = client.post("/instances/worker-0/start")
+    assert second.status_code == 200
+    assert "already running" in second.json()["message"]
+
+    # only the first start reaches process controller
+    assert controller.calls == [("start", "worker-0")]
 
 
 def test_lifecycle_ops_conflict_with_reload_returns_409(tmp_path):

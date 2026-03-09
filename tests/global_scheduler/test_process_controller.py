@@ -63,3 +63,65 @@ def test_local_process_controller_start_with_structured_launch():
     )
 
     controller.start(instance)
+
+
+def test_local_process_controller_strips_scheduler_only_max_concurrency(monkeypatch):
+    """start() should not forward scheduler-only --max-concurrency to vllm serve."""
+    captured: dict[str, object] = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+        class _Proc:
+            pid = 1
+
+        return _Proc()
+
+    monkeypatch.setattr("vllm_omni.global_scheduler.process_controller.subprocess.Popen", _fake_popen)
+
+    controller = LocalProcessController()
+    instance = InstanceSpec(
+        id="worker-0",
+        endpoint="http://127.0.0.1:9001",
+        launch_executable="vllm",
+        launch_model="Qwen/Qwen-Image",
+        launch_args=["--omni", "--max-concurrency", "100", "--ulysses-degree", "1"],
+    )
+
+    controller.start(instance)
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert "--max-concurrency" not in argv
+    assert "--ulysses-degree" in argv
+
+
+def test_local_process_controller_start_writes_to_instance_log(monkeypatch, tmp_path):
+    """Background start should route stdout/stderr to per-instance log path."""
+    monkeypatch.setenv("GLOBAL_SCHEDULER_LOG_DIR", str(tmp_path))
+
+    captured: dict[str, object] = {}
+
+    def _fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured["kwargs"] = kwargs
+
+        class _Proc:
+            pid = 12345
+
+        return _Proc()
+
+    monkeypatch.setattr("vllm_omni.global_scheduler.process_controller.subprocess.Popen", _fake_popen)
+
+    controller = LocalProcessController()
+    instance = InstanceSpec(
+        id="worker-0",
+        endpoint="http://127.0.0.1:9001",
+        launch_executable="vllm",
+        launch_model="Qwen/Qwen-Image",
+        launch_args=["--omni"],
+    )
+    controller.start(instance)
+
+    kwargs = captured["kwargs"]
+    assert kwargs["stderr"] is not None
+    assert kwargs["stdout"].name.endswith("worker-0.log")

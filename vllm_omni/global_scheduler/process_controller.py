@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 from abc import ABC, abstractmethod
+from pathlib import Path
 from urllib.parse import urlparse
 
 from .types import InstanceSpec
@@ -14,6 +15,12 @@ class LifecycleUnsupportedError(ValueError):
 
 class LifecycleExecutionError(RuntimeError):
     """Raised when lifecycle operation command execution fails."""
+
+
+def get_instance_log_path(instance_id: str) -> str:
+    """Return absolute log path for one managed instance."""
+    log_root = Path(os.environ.get("GLOBAL_SCHEDULER_LOG_DIR", "./logs/global_scheduler")).resolve()
+    return str(log_root / f"{instance_id}.log")
 
 
 class ProcessController(ABC):
@@ -44,7 +51,7 @@ class LocalProcessController(ProcessController):
 
     def start(self, instance: InstanceSpec) -> None:
         argv, env = self._build_start_argv_and_env(instance)
-        self._run(operation="start", instance=instance, argv=argv, env=env)
+        self._start_background(operation="start", instance=instance, argv=argv, env=env)
 
     def restart(self, instance: InstanceSpec) -> None:
         self.stop(instance)
@@ -57,19 +64,37 @@ class LocalProcessController(ProcessController):
         parsed = urlparse(instance.endpoint)
         if parsed.port is None:
             raise LifecycleUnsupportedError(f"endpoint has no port for instance {instance.id}")
+        launch_args = LocalProcessController._strip_scheduler_only_args(instance.launch_args)
         argv = [
             instance.launch_executable,
             "serve",
             instance.launch_model,
             "--port",
             str(parsed.port),
-            *instance.launch_args,
+            *launch_args,
         ]
         if not argv[0].strip():
             raise LifecycleUnsupportedError(f"launch executable is empty for instance {instance.id}")
         env = os.environ.copy()
         env.update(instance.launch_env)
         return argv, env
+
+    @staticmethod
+    def _strip_scheduler_only_args(args: list[str]) -> list[str]:
+        """Remove scheduler-only args that should not be forwarded to `vllm serve`."""
+        filtered: list[str] = []
+        idx = 0
+        while idx < len(args):
+            item = args[idx]
+            if item == "--max-concurrency":
+                idx += 2
+                continue
+            if item.startswith("--max-concurrency="):
+                idx += 1
+                continue
+            filtered.append(item)
+            idx += 1
+        return filtered
 
     @staticmethod
     def _run(operation: str, instance: InstanceSpec, argv: list[str], env: dict[str, str] | None) -> None:
@@ -86,3 +111,21 @@ class LocalProcessController(ProcessController):
             stdout = (exc.stdout or "").strip()
             detail = stderr or stdout or f"exit code {exc.returncode}"
             raise LifecycleExecutionError(f"{operation} failed for {instance.id}: {detail}") from exc
+
+    @staticmethod
+    def _start_background(operation: str, instance: InstanceSpec, argv: list[str], env: dict[str, str] | None) -> None:
+        log_path = Path(get_instance_log_path(instance.id))
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # Truncate old logs on every fresh start so operators always see current boot logs first.
+            with log_path.open("wb") as log_file:
+                subprocess.Popen(  # noqa: S603
+                    argv,
+                    env=env,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+        except OSError as exc:
+            raise LifecycleExecutionError(f"{operation} failed for {instance.id}: {exc}") from exc

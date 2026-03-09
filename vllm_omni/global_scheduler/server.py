@@ -6,6 +6,7 @@ import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 import json
+import logging
 import socket
 from threading import RLock
 import time
@@ -29,10 +30,13 @@ from .process_controller import (
     LifecycleUnsupportedError,
     LocalProcessController,
     ProcessController,
+    get_instance_log_path,
 )
 from .router import build_policy
 from .state import RuntimeStateStore
 from .types import InstanceSpec, RequestMeta
+
+logger = logging.getLogger("vllm_omni.global_scheduler.server")
 
 
 class UpstreamHTTPError(Exception):
@@ -49,6 +53,9 @@ class UpstreamResult(BaseModel):
     status_code: int
     body: bytes
     headers: dict[str, str]
+
+
+_NO_PROXY_OPENER = urllib_request.build_opener(urllib_request.ProxyHandler({}))
 
 
 def _build_error_payload(code: str, message: str, request_id: str) -> dict[str, Any]:
@@ -131,7 +138,7 @@ def _proxy_chat_completion(
     request = urllib_request.Request(url=url, data=body, headers=headers, method="POST")
 
     try:
-        with urllib_request.urlopen(request, timeout=timeout_s) as upstream_response:  # noqa: S310
+        with _NO_PROXY_OPENER.open(request, timeout=timeout_s) as upstream_response:  # noqa: S310
             return UpstreamResult(
                 status_code=upstream_response.status,
                 body=upstream_response.read(),
@@ -163,7 +170,7 @@ async def _open_streaming_upstream(
     """Open upstream event stream and expose status/headers/body iterator."""
     url = f"{endpoint}/v1/chat/completions"
     timeout = httpx.Timeout(timeout=timeout_s)
-    client = httpx.AsyncClient(timeout=timeout)
+    client = httpx.AsyncClient(timeout=timeout, trust_env=False)
     stream_ctx = client.stream("POST", url=url, content=body, headers=headers)
     try:
         upstream_response = await stream_ctx.__aenter__()
@@ -262,6 +269,7 @@ class LifecycleOpResponse(BaseModel):
     status: str
     process_state: str
     message: str
+    log_path: str | None = None
 
 
 def create_app(
@@ -358,6 +366,7 @@ def create_app(
                     "last_operation": lifecycle.last_operation,
                     "last_operation_ts_s": lifecycle.last_operation_ts_s,
                     "last_operation_error": lifecycle.last_operation_error,
+                    "log_path": get_instance_log_path(instance_id),
                     "routable": lifecycle.enabled and lifecycle.healthy and not lifecycle.draining,
                     "queue_len": stats.queue_len if stats else 0,
                     "inflight": stats.inflight if stats else 0,
@@ -495,6 +504,20 @@ def create_app(
                     request_id=request_id,
                 )
 
+            # Idempotent start: do not launch duplicate vLLM processes.
+            if operation == "start" and status.process_state == "running" and status.last_operation == "start":
+                return JSONResponse(
+                    status_code=200,
+                    content=LifecycleOpResponse(
+                        id=instance_id,
+                        operation=operation,
+                        status="completed",
+                        process_state=status.process_state,
+                        message="start skipped: already running",
+                        log_path=get_instance_log_path(instance_id),
+                    ).model_dump(),
+                )
+
             manager = app.state.instance_lifecycle_manager
             controller: ProcessController = app.state.process_controller
             instance_spec = status.instance
@@ -563,6 +586,7 @@ def create_app(
                     status="completed",
                     process_state=finished.process_state,
                     message=f"{operation} completed",
+                    log_path=get_instance_log_path(instance_id),
                 ).model_dump(),
             )
 
@@ -617,6 +641,16 @@ def create_app(
         filtered_headers = _filter_forward_headers(request.headers)
         payload_bytes = json.dumps(payload).encode("utf-8")
         is_stream = isinstance(payload, dict) and bool(payload.get("stream"))
+        model_name = payload.get("model") if isinstance(payload, dict) else None
+        logger.info(
+            "request.start request_id=%s model=%s stream=%s candidates=%s selected=%s endpoint=%s",
+            request_id,
+            model_name,
+            is_stream,
+            len(candidates),
+            decision.instance_id,
+            decision.endpoint,
+        )
 
         def _attach_route_headers(resp: Response) -> Response:
             resp.headers["X-Routed-Instance"] = decision.instance_id
@@ -627,6 +661,13 @@ def create_app(
         if is_stream:
             ok = False
             try:
+                logger.info(
+                    "request.proxy_stream.begin request_id=%s instance_id=%s endpoint=%s timeout_s=%s",
+                    request_id,
+                    decision.instance_id,
+                    decision.endpoint,
+                    current_config.server.request_timeout_s,
+                )
                 status_code, upstream_headers, upstream_media_type, body_iter = await _open_streaming_upstream(
                     decision.endpoint,
                     payload_bytes,
@@ -634,7 +675,19 @@ def create_app(
                     current_config.server.request_timeout_s,
                 )
                 ok = True
+                logger.info(
+                    "request.proxy_stream.headers request_id=%s instance_id=%s status_code=%s",
+                    request_id,
+                    decision.instance_id,
+                    status_code,
+                )
             except UpstreamHTTPError as exc:
+                logger.warning(
+                    "request.proxy_stream.http_error request_id=%s instance_id=%s status_code=%s",
+                    request_id,
+                    decision.instance_id,
+                    exc.status_code,
+                )
                 app.state.runtime_state_store.on_request_finish(
                     decision.instance_id,
                     latency_s=time.monotonic() - started_at,
@@ -651,6 +704,11 @@ def create_app(
                     )
                 )
             except TimeoutError:
+                logger.warning(
+                    "request.proxy_stream.timeout request_id=%s instance_id=%s",
+                    request_id,
+                    decision.instance_id,
+                )
                 app.state.runtime_state_store.on_request_finish(
                     decision.instance_id,
                     latency_s=time.monotonic() - started_at,
@@ -667,6 +725,12 @@ def create_app(
                     )
                 )
             except OSError as exc:
+                logger.warning(
+                    "request.proxy_stream.network_error request_id=%s instance_id=%s error=%s",
+                    request_id,
+                    decision.instance_id,
+                    str(exc),
+                )
                 app.state.runtime_state_store.on_request_finish(
                     decision.instance_id,
                     latency_s=time.monotonic() - started_at,
@@ -690,11 +754,25 @@ def create_app(
                         yield chunk
                 except Exception:
                     stream_ok = False
+                    logger.exception(
+                        "request.proxy_stream.body_error request_id=%s instance_id=%s",
+                        request_id,
+                        decision.instance_id,
+                    )
                     raise
                 finally:
+                    elapsed_s = time.monotonic() - started_at
+                    logger.info(
+                        "request.finish request_id=%s instance_id=%s stream=%s ok=%s latency_s=%.3f",
+                        request_id,
+                        decision.instance_id,
+                        True,
+                        stream_ok,
+                        elapsed_s,
+                    )
                     app.state.runtime_state_store.on_request_finish(
                         decision.instance_id,
-                        latency_s=time.monotonic() - started_at,
+                        latency_s=elapsed_s,
                         ok=stream_ok,
                     )
 
@@ -710,6 +788,13 @@ def create_app(
         response: Response
         ok = False
         try:
+            logger.info(
+                "request.proxy.begin request_id=%s instance_id=%s endpoint=%s timeout_s=%s",
+                request_id,
+                decision.instance_id,
+                decision.endpoint,
+                current_config.server.request_timeout_s,
+            )
             upstream_result = await asyncio.to_thread(
                 _proxy_chat_completion,
                 decision.endpoint,
@@ -728,7 +813,19 @@ def create_app(
                 for key, value in _select_upstream_response_headers(upstream_result.headers).items():
                     response.headers[key] = value
             ok = True
+            logger.info(
+                "request.proxy.ok request_id=%s instance_id=%s status_code=%s",
+                request_id,
+                decision.instance_id,
+                response.status_code,
+            )
         except UpstreamHTTPError as exc:
+            logger.warning(
+                "request.proxy.http_error request_id=%s instance_id=%s status_code=%s",
+                request_id,
+                decision.instance_id,
+                exc.status_code,
+            )
             response = JSONResponse(
                 status_code=exc.status_code,
                 content=_build_error_payload(
@@ -738,6 +835,11 @@ def create_app(
                 ),
             )
         except TimeoutError:
+            logger.warning(
+                "request.proxy.timeout request_id=%s instance_id=%s",
+                request_id,
+                decision.instance_id,
+            )
             response = JSONResponse(
                 status_code=502,
                 content=_build_error_payload(
@@ -747,6 +849,12 @@ def create_app(
                 ),
             )
         except OSError as exc:
+            logger.warning(
+                "request.proxy.network_error request_id=%s instance_id=%s error=%s",
+                request_id,
+                decision.instance_id,
+                str(exc),
+            )
             response = JSONResponse(
                 status_code=502,
                 content=_build_error_payload(
@@ -756,9 +864,18 @@ def create_app(
                 ),
             )
         finally:
+            elapsed_s = time.monotonic() - started_at
+            logger.info(
+                "request.finish request_id=%s instance_id=%s stream=%s ok=%s latency_s=%.3f",
+                request_id,
+                decision.instance_id,
+                False,
+                ok,
+                elapsed_s,
+            )
             app.state.runtime_state_store.on_request_finish(
                 decision.instance_id,
-                latency_s=time.monotonic() - started_at,
+                latency_s=elapsed_s,
                 ok=ok,
             )
 
