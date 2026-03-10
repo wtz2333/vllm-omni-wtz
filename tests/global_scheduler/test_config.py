@@ -1,5 +1,7 @@
 """Config loading and validation tests for global scheduler."""
 
+"""Config loading and validation tests for global scheduler."""
+
 import textwrap
 
 import pytest
@@ -11,6 +13,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 def test_load_config_success(tmp_path):
     """Config with valid server and instances should load successfully."""
+    """Config with valid server and instances should load successfully."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -21,12 +24,8 @@ def test_load_config_success(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
               - id: worker-1
                 endpoint: http://127.0.0.1:9002
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -40,6 +39,7 @@ def test_load_config_success(tmp_path):
 
 def test_load_config_duplicate_instance_id(tmp_path):
     """Duplicate instance ids should be rejected by config validation."""
+    """Duplicate instance ids should be rejected by config validation."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -47,12 +47,8 @@ def test_load_config_duplicate_instance_id(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
               - id: worker-0
                 endpoint: http://127.0.0.1:9002
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -64,6 +60,7 @@ def test_load_config_duplicate_instance_id(tmp_path):
 
 def test_load_config_invalid_endpoint(tmp_path):
     """Only http://host:port endpoints should be accepted."""
+    """Only http://host:port endpoints should be accepted."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -71,8 +68,6 @@ def test_load_config_invalid_endpoint(tmp_path):
             instances:
               - id: worker-0
                 endpoint: https://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -94,8 +89,6 @@ def test_load_config_baseline_algorithm_success(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -118,8 +111,6 @@ def test_load_config_short_queue_runtime_algorithm(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -128,6 +119,28 @@ def test_load_config_short_queue_runtime_algorithm(tmp_path):
     config = load_config(config_path)
 
     assert config.policy.baseline.algorithm == "short_queue_runtime"
+
+
+def test_load_config_round_robin_algorithm(tmp_path):
+    """round_robin should be accepted as a baseline algorithm."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            policy:
+              baseline:
+                algorithm: round_robin
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.policy.baseline.algorithm == "round_robin"
 
 
 def test_load_config_invalid_baseline_algorithm(tmp_path):
@@ -142,8 +155,6 @@ def test_load_config_invalid_baseline_algorithm(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -167,8 +178,6 @@ def test_load_config_legacy_sp1_keys_are_rejected(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -190,12 +199,64 @@ def test_load_config_legacy_mode_key_is_rejected(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
     )
 
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        load_config(config_path)
+
+
+def test_load_config_instance_lifecycle_structured_fields_success(tmp_path):
+    """Structured launch/stop fields should be accepted."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+                launch:
+                  model: Qwen/Qwen-Image
+                  executable: vllm
+                  args: ["--omni", "--ulysses-degree", "2"]
+                  env:
+                    CUDA_VISIBLE_DEVICES: "0,1"
+                stop:
+                  executable: pkill
+                  args: ["-f", "vllm serve Qwen/Qwen-Image --port 9001"]
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.instances[0].launch is not None
+    assert config.instances[0].launch.model == "Qwen/Qwen-Image"
+    assert config.instances[0].launch.args == ["--omni", "--ulysses-degree", "2"]
+    assert config.instances[0].launch.env["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert config.instances[0].stop is not None
+    assert config.instances[0].stop.args[0] == "-f"
+
+
+def test_load_config_empty_launch_arg_rejected(tmp_path):
+    """Structured launch args should reject blank items."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+                launch:
+                  model: Qwen/Qwen-Image
+                  args: ["--omni", "   "]
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="launch.args cannot include empty items"):
         load_config(config_path)

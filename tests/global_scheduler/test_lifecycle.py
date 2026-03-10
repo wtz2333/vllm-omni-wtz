@@ -1,5 +1,7 @@
 """Lifecycle manager health, draining, and reload behavior tests."""
 
+"""Lifecycle manager health, draining, and reload behavior tests."""
+
 import pytest
 
 from vllm_omni.global_scheduler.lifecycle import InstanceLifecycleManager
@@ -15,13 +17,19 @@ def _instances() -> list[InstanceSpec]:
     Returns:
         Static instance list used by lifecycle state assertions.
     """
+    """Build a deterministic two-instance fixture for lifecycle tests.
+
+    Returns:
+        Static instance list used by lifecycle state assertions.
+    """
     return [
-        InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001", max_concurrency=2),
-        InstanceSpec(id="worker-1", endpoint="http://127.0.0.1:9002", max_concurrency=2),
+        InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001"),
+        InstanceSpec(id="worker-1", endpoint="http://127.0.0.1:9002"),
     ]
 
 
 def test_unhealthy_or_disabled_instances_are_excluded_from_routable_set():
+    """Routable set should exclude disabled or unhealthy instances."""
     """Routable set should exclude disabled or unhealthy instances."""
     manager = InstanceLifecycleManager(_instances())
 
@@ -41,15 +49,16 @@ def test_unhealthy_or_disabled_instances_are_excluded_from_routable_set():
 
 def test_reload_keeps_removed_instance_until_inflight_converges():
     """Removed instances should remain draining until runtime work converges."""
+    """Removed instances should remain draining until runtime work converges."""
     instances = _instances()
     store = RuntimeStateStore(instances=instances)
     manager = InstanceLifecycleManager(instances)
 
     store.on_request_start("worker-1")
-    store.sync_instances([InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001", max_concurrency=2)])
+    store.sync_instances([InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001")])
 
     manager.sync_instances(
-        [InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001", max_concurrency=2)],
+        [InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001")],
         runtime_snapshot=store.snapshot(),
     )
 
@@ -102,3 +111,17 @@ def test_user_disabled_instance_is_kept_after_drain_converges():
     assert "worker-1" in final
     assert final["worker-1"].enabled is False
     assert final["worker-1"].draining is False
+
+
+def test_non_running_process_state_is_excluded_from_routable_set():
+    """Instances in non-running process states must not be routed."""
+    manager = InstanceLifecycleManager(_instances())
+
+    manager.set_process_state("worker-0", process_state="restarting", operation="restart")
+    routable_ids = [item.id for item in manager.get_routable_instances()]
+    assert routable_ids == ["worker-1"]
+
+    snapshot = manager.snapshot()
+    assert snapshot["worker-0"].process_state == "restarting"
+    assert snapshot["worker-0"].last_operation == "restart"
+    assert snapshot["worker-0"].last_operation_ts_s is not None

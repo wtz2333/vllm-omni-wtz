@@ -10,16 +10,7 @@ Main module:
 
 ## 1. Quick Start
 
-### 1.1 Start upstream vLLM instances
-
-Example (two instances on different ports):
-
-```bash
-vllm serve Qwen/Qwen-Image --omni --port 9001
-vllm serve Qwen/Qwen-Image --omni --port 9002
-```
-
-### 1.2 Create scheduler config
+### 1.1 Create scheduler config
 
 Create `global_scheduler.yaml`:
 
@@ -37,20 +28,34 @@ scheduler:
 
 policy:
   baseline:
-    algorithm: fcfs  # fcfs | short_queue_runtime | estimated_completion_time
+    algorithm: fcfs  # fcfs | round_robin | short_queue_runtime | estimated_completion_time
 
 instances:
   - id: worker-0
     endpoint: http://127.0.0.1:9001
-    sp_size: 1
-    max_concurrency: 2
+    launch:
+      executable: vllm
+      model: Qwen/Qwen-Image
+      args: ["--omni", "--max-concurrency", "2", "--ulysses-degree", "2", "--cfg-parallel-size", "2", "--hsdp"]
+      env:
+        CUDA_VISIBLE_DEVICES: "0,1"
+    stop:
+      executable: pkill
+      args: ["-f", "vllm serve Qwen/Qwen-Image --port 9001"]
   - id: worker-1
     endpoint: http://127.0.0.1:9002
-    sp_size: 1
-    max_concurrency: 2
+    launch:
+      executable: vllm
+      model: Qwen/Qwen-Image
+      args: ["--omni", "--max-concurrency", "2", "--ulysses-degree", "2", "--cfg-parallel-size", "2", "--hsdp"]
+      env:
+        CUDA_VISIBLE_DEVICES: "2,3"
+    stop:
+      executable: pkill
+      args: ["-f", "vllm serve Qwen/Qwen-Image --port 9002"]
 ```
 
-### 1.3 Start global scheduler
+### 1.2 Start global scheduler
 
 ```bash
 python3 -m vllm_omni.global_scheduler.server --config ./global_scheduler.yaml
@@ -58,7 +63,33 @@ python3 -m vllm_omni.global_scheduler.server --config ./global_scheduler.yaml
 
 The scheduler listens at `http://<host>:<port>` from config (default `8089`).
 
-### 1.4 Smoke test with one request
+Important behavior:
+
+- This command starts the scheduler service itself.
+- It does not automatically start all upstream workers on boot.
+- Use lifecycle APIs (`/instances/{id}/start|stop|restart`) to control workers through scheduler.
+
+### 1.3 Start workers via scheduler lifecycle APIs
+
+```bash
+curl -sS -X POST http://127.0.0.1:8089/instances/worker-0/start
+curl -sS -X POST http://127.0.0.1:8089/instances/worker-1/start
+```
+
+### 1.4 Check readiness
+
+```bash
+curl -sS http://127.0.0.1:8089/instances
+```
+
+Ensure at least one instance has:
+
+- `enabled=true`
+- `healthy=true`
+- `draining=false`
+- `process_state=running`
+
+### 1.5 Smoke test with one request
 
 ```bash
 curl -sS http://127.0.0.1:8089/v1/chat/completions \
@@ -102,6 +133,9 @@ curl -sS http://127.0.0.1:8089/instances
 
 - `POST /instances/{id}/disable`
 - `POST /instances/{id}/enable`
+- `POST /instances/{id}/stop`
+- `POST /instances/{id}/start`
+- `POST /instances/{id}/restart`
 - `POST /instances/reload`
 - `POST /instances/probe`
 
@@ -110,13 +144,17 @@ Examples:
 ```bash
 curl -sS -X POST http://127.0.0.1:8089/instances/worker-0/disable
 curl -sS -X POST http://127.0.0.1:8089/instances/worker-0/enable
+curl -sS -X POST http://127.0.0.1:8089/instances/worker-0/stop
+curl -sS -X POST http://127.0.0.1:8089/instances/worker-0/start
+curl -sS -X POST http://127.0.0.1:8089/instances/worker-0/restart
 curl -sS -X POST http://127.0.0.1:8089/instances/reload
 curl -sS -X POST http://127.0.0.1:8089/instances/probe
 ```
 
 Notes:
 
-- `stop/start/restart` APIs are design-stage items and are not exposed yet.
+- `start/restart` require `instances[].launch` config.
+- `stop/restart` require `instances[].stop` config.
 - `reload` requires server started with `--config` and reload-capable loader (default path in module entrypoint supports this).
 
 ## 3. Routing Policies
@@ -124,6 +162,7 @@ Notes:
 Set in YAML:
 
 - `policy.baseline.algorithm=fcfs`
+- `policy.baseline.algorithm=round_robin`
 - `policy.baseline.algorithm=short_queue_runtime`
 - `policy.baseline.algorithm=estimated_completion_time`
 
@@ -131,6 +170,8 @@ Related knobs:
 
 - `scheduler.tie_breaker`: `random` or `lexical`
 - `scheduler.ewma_alpha`: EWMA smoothing factor `(0, 1]`
+- per-instance routing concurrency is inferred from `instances[].launch.args`
+  - recommended flag: `--max-concurrency`
 
 ## 4. Error Semantics
 
@@ -152,6 +193,9 @@ Common error codes:
 - `GS_UPSTREAM_TIMEOUT` (502)
 - `GS_UPSTREAM_NETWORK_ERROR` (502)
 - `GS_UPSTREAM_HTTP_ERROR` (upstream status code)
+- `GS_LIFECYCLE_CONFLICT` (409)
+- `GS_LIFECYCLE_UNSUPPORTED` (400)
+- `GS_LIFECYCLE_EXEC_ERROR` (502)
 
 ## 5. Benchmark Through Scheduler
 
@@ -183,6 +227,7 @@ Check:
   - `enabled=true`
   - `healthy=true`
   - `draining=false`
+  - `process_state=running`
 - Upstream endpoint in config is reachable (`http://host:port`, no path)
 
 ### 6.2 Frequent `GS_UPSTREAM_TIMEOUT`
@@ -200,10 +245,10 @@ Common causes:
 - duplicate `instances[].id`
 - invalid `policy.baseline.algorithm`
 - invalid endpoint format (must be `http://host:port`)
-- `sp_size != 1` in current stage
+- malformed structured `launch/stop` config
 
 ## 7. Current Limitations
 
 - No dynamic SP scheduling.
 - No `/metrics` endpoint yet in current implementation.
-- No process-level `stop/start/restart` API yet.
+- Local process control depends on command templates; production environments should prefer orchestrator-native adapters.

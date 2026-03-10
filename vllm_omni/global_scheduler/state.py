@@ -22,6 +22,13 @@ class RuntimeStateStore:
             ewma_alpha: EWMA smoothing factor in the range (0, 1].
             default_ewma_service_time_s: Initial service time fallback in seconds.
         """
+        """Initialize runtime state for all configured instances.
+
+        Args:
+            instances: Static instance definitions from config.
+            ewma_alpha: EWMA smoothing factor in the range (0, 1].
+            default_ewma_service_time_s: Initial service time fallback in seconds.
+        """
         if not 0.0 < ewma_alpha <= 1.0:
             raise ValueError("ewma_alpha must be in (0, 1]")
         if default_ewma_service_time_s <= 0.0:
@@ -31,7 +38,8 @@ class RuntimeStateStore:
         self._lock = RLock()
         self._default_ewma_service_time_s = default_ewma_service_time_s
         self._draining_instance_ids: set[str] = set()
-
+        self._default_ewma_service_time_s = default_ewma_service_time_s
+        self._draining_instance_ids: set[str] = set()
         self._stats: dict[str, RuntimeStats] = {
             instance.id: RuntimeStats(
                 queue_len=0,
@@ -50,6 +58,11 @@ class RuntimeStateStore:
             return {instance_id: replace(stats) for instance_id, stats in self._stats.items()}
 
     def sync_instances(self, instances: list[InstanceSpec]) -> None:
+        """Reconcile tracked runtime entries with latest instance config.
+
+        Args:
+            instances: Latest configured instance list.
+        """
         """Reconcile tracked runtime entries with latest instance config.
 
         Args:
@@ -87,6 +100,14 @@ class RuntimeStateStore:
         Returns:
             Snapshot of updated runtime stats.
         """
+        """Apply start-of-request counters for one instance.
+
+        Args:
+            instance_id: Target routed instance id.
+
+        Returns:
+            Snapshot of updated runtime stats.
+        """
         with self._lock:
             stats = self._get_stats(instance_id)
             stats.queue_len += 1
@@ -94,6 +115,16 @@ class RuntimeStateStore:
             return replace(stats)
 
     def on_request_finish(self, instance_id: str, latency_s: float, ok: bool) -> RuntimeStats:
+        """Apply finish-of-request counters and EWMA update.
+
+        Args:
+            instance_id: Target routed instance id.
+            latency_s: Observed end-to-end upstream latency in seconds.
+            ok: Whether upstream handling succeeded.
+
+        Returns:
+            Snapshot of updated runtime stats.
+        """
         """Apply finish-of-request counters and EWMA update.
 
         Args:
@@ -114,6 +145,11 @@ class RuntimeStateStore:
                 stats.ewma_service_time_s = (
                     self._ewma_alpha * latency_s + (1.0 - self._ewma_alpha) * stats.ewma_service_time_s
                 )
+
+            if instance_id in self._draining_instance_ids and stats.queue_len == 0 and stats.inflight == 0:
+                self._draining_instance_ids.remove(instance_id)
+                del self._stats[instance_id]
+                return RuntimeStats(queue_len=0, inflight=0, ewma_service_time_s=stats.ewma_service_time_s)
 
             if instance_id in self._draining_instance_ids and stats.queue_len == 0 and stats.inflight == 0:
                 self._draining_instance_ids.remove(instance_id)

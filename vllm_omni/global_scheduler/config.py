@@ -19,7 +19,6 @@ class ServerConfig(BaseModel):
     instance_health_check_timeout_s: float = Field(default=1.0, gt=0.0)
 
 
-
 class SchedulerConfig(BaseModel):
     """Global scheduler runtime tuning parameters."""
 
@@ -46,9 +45,9 @@ class BaselinePolicyConfig(BaseModel):
     @field_validator("algorithm")
     @classmethod
     def validate_algorithm(cls, value: str) -> str:
-        if value not in {"fcfs", "short_queue_runtime", "estimated_completion_time"}:
+        if value not in {"fcfs", "round_robin", "short_queue_runtime", "estimated_completion_time"}:
             raise ValueError(
-                "policy.baseline.algorithm must be one of: fcfs, short_queue_runtime, estimated_completion_time"
+                "policy.baseline.algorithm must be one of: fcfs, round_robin, short_queue_runtime, estimated_completion_time"
             )
         return value
 
@@ -61,6 +60,64 @@ class PolicyConfig(BaseModel):
     baseline: BaselinePolicyConfig = Field(default_factory=BaselinePolicyConfig)
 
 
+class LaunchConfig(BaseModel):
+    """Structured launch config for `vllm serve` command generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    model: str
+    executable: str = "vllm"
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("model", "executable")
+    @classmethod
+    def validate_non_empty_str(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("launch.model and launch.executable cannot be empty")
+        return value
+
+    @field_validator("args")
+    @classmethod
+    def validate_args(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item.strip():
+                raise ValueError("launch.args cannot include empty items")
+        return value
+
+    @field_validator("env")
+    @classmethod
+    def validate_env(cls, value: dict[str, str]) -> dict[str, str]:
+        for key in value:
+            if not key.strip():
+                raise ValueError("launch.env keys cannot be empty")
+        return value
+
+
+class StopConfig(BaseModel):
+    """Structured stop command config for one instance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    executable: str = "pkill"
+    args: list[str] = Field(default_factory=list)
+
+    @field_validator("executable")
+    @classmethod
+    def validate_executable(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("stop.executable cannot be empty")
+        return value
+
+    @field_validator("args")
+    @classmethod
+    def validate_stop_args(cls, value: list[str]) -> list[str]:
+        for item in value:
+            if not item.strip():
+                raise ValueError("stop.args cannot include empty items")
+        return value
+
+
 class InstanceConfig(BaseModel):
     """Static upstream instance configuration entry."""
 
@@ -68,21 +125,14 @@ class InstanceConfig(BaseModel):
 
     id: str
     endpoint: str
-    sp_size: int = 1
-    max_concurrency: int = Field(default=1, ge=1)
+    launch: LaunchConfig | None = None
+    stop: StopConfig | None = None
 
     @field_validator("id")
     @classmethod
     def validate_id(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("instances[].id cannot be empty")
-        return value
-
-    @field_validator("sp_size")
-    @classmethod
-    def validate_sp_size(cls, value: int) -> int:
-        if value != 1:
-            raise ValueError("instances[].sp_size must be 1 in current stage")
         return value
 
     @field_validator("endpoint")

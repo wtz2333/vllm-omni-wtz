@@ -7,6 +7,7 @@ import pytest
 from vllm_omni.global_scheduler.config import load_config
 from vllm_omni.global_scheduler.policies.estimated_completion_time import EstimatedCompletionTimePolicy
 from vllm_omni.global_scheduler.policies.first_come_first_served import FirstComeFirstServedPolicy
+from vllm_omni.global_scheduler.policies.round_robin import RoundRobinPolicy
 from vllm_omni.global_scheduler.policies.short_queue_runtime import ShortQueueRuntimePolicy
 from vllm_omni.global_scheduler.router import build_policy
 from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RuntimeStats
@@ -26,8 +27,6 @@ def test_router_builds_fcfs_policy(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -39,7 +38,7 @@ def test_router_builds_fcfs_policy(tmp_path):
     assert isinstance(policy._delegate, FirstComeFirstServedPolicy)
 
 
-def test_router_rejects_extra_scheduler_keys(tmp_path):
+def test_router_rejects_unknown_scheduler_type(tmp_path):
     """Unexpected scheduler keys should fail strict config validation."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
@@ -50,8 +49,6 @@ def test_router_rejects_extra_scheduler_keys(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -73,8 +70,6 @@ def test_router_builds_short_queue_runtime_policy(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -84,6 +79,29 @@ def test_router_builds_short_queue_runtime_policy(tmp_path):
     policy = build_policy(config)
 
     assert isinstance(policy._delegate, ShortQueueRuntimePolicy)
+
+
+def test_router_builds_round_robin_policy(tmp_path):
+    """Router should construct round_robin delegate when configured."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            policy:
+              baseline:
+                algorithm: round_robin
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    policy = build_policy(config)
+
+    assert isinstance(policy._delegate, RoundRobinPolicy)
 
 
 def test_router_builds_estimated_completion_time_policy(tmp_path):
@@ -98,8 +116,6 @@ def test_router_builds_estimated_completion_time_policy(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -123,8 +139,6 @@ def test_router_reason_uses_router_prefix_without_duplicate_algorithm_marker(tmp
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 2
             """
         ),
         encoding="utf-8",
@@ -134,7 +148,7 @@ def test_router_reason_uses_router_prefix_without_duplicate_algorithm_marker(tmp
     policy = build_policy(config)
     decision = policy.select_instance(
         request=RequestMeta(request_id="req-1"),
-        instances=[InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001", max_concurrency=2)],
+        instances=[InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001")],
         runtime_stats={"worker-0": RuntimeStats(queue_len=0, inflight=0, ewma_service_time_s=1.0)},
     )
 

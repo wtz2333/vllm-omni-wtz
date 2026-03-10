@@ -3,6 +3,7 @@ from __future__ import annotations
 from .estimated_completion_time import EstimatedCompletionTimePolicy
 from .first_come_first_served import FirstComeFirstServedPolicy
 from .policy_base import PolicyBase
+from .round_robin import RoundRobinPolicy
 from .runtime_estimator import RuntimeEstimator
 from .short_queue_runtime import ShortQueueRuntimePolicy
 from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RouteDecision, RuntimeStats
@@ -23,6 +24,8 @@ class AlgorithmPolicyRouter(PolicyBase):
         self._delegate: PolicyBase
         if algorithm == "fcfs":
             self._delegate = FirstComeFirstServedPolicy(tie_breaker=tie_breaker)
+        elif algorithm == "round_robin":
+            self._delegate = RoundRobinPolicy(tie_breaker=tie_breaker)
         elif algorithm == "short_queue_runtime":
             self._delegate = ShortQueueRuntimePolicy(
                 tie_breaker=tie_breaker,
@@ -35,7 +38,7 @@ class AlgorithmPolicyRouter(PolicyBase):
             )
         else:
             raise ValueError(
-                "Unsupported baseline algorithm. expected one of: fcfs, short_queue_runtime, estimated_completion_time"
+                "Unsupported baseline algorithm. expected one of: fcfs, round_robin, short_queue_runtime, estimated_completion_time"
             )
 
     def select_instance(

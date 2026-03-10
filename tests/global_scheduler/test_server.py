@@ -1,17 +1,20 @@
 """Scheduler server endpoint and lifecycle API tests."""
 
+from collections.abc import AsyncIterator
 import textwrap
 
 import pytest
 from fastapi.testclient import TestClient
 
 from vllm_omni.global_scheduler.config import load_config
+from vllm_omni.global_scheduler.process_controller import ProcessController
 from vllm_omni.global_scheduler.server import UpstreamHTTPError, create_app
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_health_endpoint_returns_scheduler_and_ok(tmp_path):
+    """Health endpoint should report ok when config is present and valid."""
     """Health endpoint should report ok when config is present and valid."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
@@ -20,8 +23,6 @@ def test_health_endpoint_returns_scheduler_and_ok(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -44,6 +45,7 @@ def test_health_endpoint_returns_scheduler_and_ok(tmp_path):
 
 def test_health_endpoint_returns_503_when_config_missing(tmp_path):
     """Health endpoint should degrade when app config is missing."""
+    """Health endpoint should degrade when app config is missing."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -51,8 +53,6 @@ def test_health_endpoint_returns_503_when_config_missing(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -74,6 +74,7 @@ def test_health_endpoint_returns_503_when_config_missing(tmp_path):
 
 def test_load_config_missing_file_raises_clear_error(tmp_path):
     """Missing config file should produce a clear validation error."""
+    """Missing config file should produce a clear validation error."""
     missing = tmp_path / "not_found.yaml"
 
     with pytest.raises(ValueError, match="Config file not found"):
@@ -81,6 +82,7 @@ def test_load_config_missing_file_raises_clear_error(tmp_path):
 
 
 def test_instance_lifecycle_control_endpoints(tmp_path):
+    """Enable/disable endpoints should update routable state as expected."""
     """Enable/disable endpoints should update routable state as expected."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
@@ -92,8 +94,6 @@ def test_instance_lifecycle_control_endpoints(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -124,6 +124,7 @@ def test_instance_lifecycle_control_endpoints(tmp_path):
 
 def test_reload_endpoint_replaces_instance_set(tmp_path):
     """Reload endpoint should reconcile and replace configured instances."""
+    """Reload endpoint should reconcile and replace configured instances."""
     initial_path = tmp_path / "scheduler.yaml"
     reloaded_path = tmp_path / "scheduler_reloaded.yaml"
 
@@ -135,8 +136,6 @@ def test_reload_endpoint_replaces_instance_set(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -149,8 +148,6 @@ def test_reload_endpoint_replaces_instance_set(tmp_path):
             instances:
               - id: worker-1
                 endpoint: http://127.0.0.1:9002
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -174,6 +171,7 @@ def test_reload_endpoint_replaces_instance_set(tmp_path):
 
 def test_reload_endpoint_returns_501_without_loader(tmp_path):
     """Reload endpoint should return 501 when reload loader is not configured."""
+    """Reload endpoint should return 501 when reload loader is not configured."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -183,8 +181,6 @@ def test_reload_endpoint_returns_501_without_loader(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -210,8 +206,6 @@ def test_probe_endpoint_runs_probe_in_to_thread(tmp_path, monkeypatch):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -250,8 +244,6 @@ def test_chat_completions_success_sets_route_headers_and_state(tmp_path, monkeyp
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -298,8 +290,6 @@ def test_chat_completions_returns_503_when_no_routable_instance(tmp_path):
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -337,8 +327,6 @@ def test_chat_completions_error_semantics_and_state_cleanup(tmp_path, monkeypatc
             instances:
               - id: worker-0
                 endpoint: http://127.0.0.1:9001
-                sp_size: 1
-                max_concurrency: 1
             """
         ),
         encoding="utf-8",
@@ -368,3 +356,232 @@ def test_chat_completions_error_semantics_and_state_cleanup(tmp_path, monkeypatc
     snapshot = app.state.runtime_state_store.snapshot()
     assert snapshot["worker-0"].queue_len == 0
     assert snapshot["worker-0"].inflight == 0
+
+
+def test_chat_completions_unexpected_exception_still_cleans_state(tmp_path, monkeypatch):
+    """Unexpected proxy exceptions should still release runtime counters."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              request_timeout_s: 3
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    app = create_app(config)
+
+    def _fake_proxy(*_args, **_kwargs):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr("vllm_omni.global_scheduler.server._proxy_chat_completion", _fake_proxy)
+
+    # Keep server exception inside HTTP 500 response to assert post-state.
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-request-id": "req-unexpected"},
+        json={"model": "demo", "messages": []},
+    )
+
+    assert response.status_code == 500
+    snapshot = app.state.runtime_state_store.snapshot()
+    assert snapshot["worker-0"].queue_len == 0
+    assert snapshot["worker-0"].inflight == 0
+
+
+def test_chat_completions_streaming_passthrough_and_state_cleanup(tmp_path, monkeypatch):
+    """Stream path should passthrough upstream metadata and cleanup counters."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              request_timeout_s: 3
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    app = create_app(config)
+
+    async def _fake_stream() -> AsyncIterator[bytes]:
+        yield b"data: part-1\n\n"
+        yield b"data: [DONE]\n\n"
+
+    async def _fake_open_streaming_upstream(*_args, **_kwargs):
+        return (
+            200,
+            {"x-upstream-header": "ok", "content-type": "text/event-stream"},
+            "text/event-stream",
+            _fake_stream(),
+        )
+
+    monkeypatch.setattr(
+        "vllm_omni.global_scheduler.server._open_streaming_upstream",
+        _fake_open_streaming_upstream,
+    )
+
+    client = TestClient(app)
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"x-request-id": "req-stream"},
+        json={"model": "demo", "messages": [], "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert response.headers["x-upstream-header"] == "ok"
+    assert response.headers["X-Routed-Instance"] == "worker-0"
+    assert "data: part-1" in response.text
+    assert "data: [DONE]" in response.text
+
+    snapshot = app.state.runtime_state_store.snapshot()
+    assert snapshot["worker-0"].queue_len == 0
+    assert snapshot["worker-0"].inflight == 0
+
+
+class _FakeProcessController(ProcessController):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def stop(self, instance) -> None:
+        self.calls.append(("stop", instance.id))
+
+    def start(self, instance) -> None:
+        self.calls.append(("start", instance.id))
+
+    def restart(self, instance) -> None:
+        self.calls.append(("restart", instance.id))
+
+
+def test_instance_lifecycle_ops_endpoints_update_process_state(tmp_path):
+    """stop/start/restart endpoints should update state and use process controller."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    controller = _FakeProcessController()
+    config = load_config(config_path)
+    app = create_app(config, process_controller=controller)
+    client = TestClient(app)
+
+    stop_resp = client.post("/instances/worker-0/stop")
+    assert stop_resp.status_code == 200
+    assert stop_resp.json()["process_state"] == "stopped"
+    assert stop_resp.json()["log_path"].endswith("worker-0.log")
+
+    start_resp = client.post("/instances/worker-0/start")
+    assert start_resp.status_code == 200
+    assert start_resp.json()["process_state"] == "running"
+
+    restart_resp = client.post("/instances/worker-0/restart")
+    assert restart_resp.status_code == 200
+    assert restart_resp.json()["process_state"] == "running"
+
+    assert controller.calls == [("stop", "worker-0"), ("start", "worker-0"), ("restart", "worker-0")]
+    instance_view = client.get("/instances").json()["instances"][0]
+    assert instance_view["process_state"] == "running"
+    assert instance_view["last_operation"] == "restart"
+    assert instance_view["log_path"].endswith("worker-0.log")
+
+
+def test_lifecycle_start_is_idempotent_when_already_running(tmp_path):
+    """Second start on running instance should be a no-op."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    controller = _FakeProcessController()
+    config = load_config(config_path)
+    app = create_app(config, process_controller=controller)
+    client = TestClient(app)
+
+    first = client.post("/instances/worker-0/start")
+    assert first.status_code == 200
+
+    second = client.post("/instances/worker-0/start")
+    assert second.status_code == 200
+    assert "already running" in second.json()["message"]
+
+    # only the first start reaches process controller
+    assert controller.calls == [("start", "worker-0")]
+
+
+def test_lifecycle_ops_conflict_with_reload_returns_409(tmp_path):
+    """Lifecycle op should reject requests while reload is in progress."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    app = create_app(config, process_controller=_FakeProcessController())
+    app.state.reload_in_progress = True
+    client = TestClient(app)
+
+    response = client.post("/instances/worker-0/restart")
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["error"]["code"] == "GS_LIFECYCLE_CONFLICT"
+
+
+def test_lifecycle_ops_unconfigured_command_returns_400(tmp_path):
+    """Missing lifecycle command should return GS_LIFECYCLE_UNSUPPORTED."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            server:
+              instance_health_check_interval_s: 100
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+    app = create_app(config)
+    client = TestClient(app)
+
+    response = client.post("/instances/worker-0/stop")
+    assert response.status_code == 400
+    payload = response.json()
+    assert payload["error"]["code"] == "GS_LIFECYCLE_UNSUPPORTED"
