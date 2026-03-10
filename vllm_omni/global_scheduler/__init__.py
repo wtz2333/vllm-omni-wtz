@@ -4,6 +4,7 @@ from .policies import (
     AlgorithmPolicyRouter,
     EstimatedCompletionTimePolicy,
     FirstComeFirstServedPolicy,
+    RoundRobinPolicy,
     RuntimeEstimator,
     ShortQueueRuntimePolicy,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "LocalProcessController",
     "ProcessController",
     "RuntimeStateStore",
+    "RoundRobinPolicy",
     "RuntimeEstimator",
     "ShortQueueRuntimePolicy",
     "build_policy",

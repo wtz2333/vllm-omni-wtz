@@ -316,16 +316,8 @@ def create_app(
                 await asyncio.to_thread(
                     app.state.instance_lifecycle_manager.probe_all,
                     timeout_s,
-                current_config = getattr(app.state, "global_scheduler_config", config)
-                timeout_s = current_config.server.instance_health_check_timeout_s
-                interval_s = current_config.server.instance_health_check_interval_s
-
-                await asyncio.to_thread(
-                    app.state.instance_lifecycle_manager.probe_all,
-                    timeout_s,
                 )
                 app.state.instance_lifecycle_manager.converge_draining(app.state.runtime_state_store.snapshot())
-                await asyncio.sleep(interval_s)
                 await asyncio.sleep(interval_s)
 
         app.state.health_probe_task = asyncio.create_task(_run())

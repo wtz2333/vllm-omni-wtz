@@ -7,6 +7,7 @@ import pytest
 from vllm_omni.global_scheduler.config import load_config
 from vllm_omni.global_scheduler.policies.estimated_completion_time import EstimatedCompletionTimePolicy
 from vllm_omni.global_scheduler.policies.first_come_first_served import FirstComeFirstServedPolicy
+from vllm_omni.global_scheduler.policies.round_robin import RoundRobinPolicy
 from vllm_omni.global_scheduler.policies.short_queue_runtime import ShortQueueRuntimePolicy
 from vllm_omni.global_scheduler.router import build_policy
 from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta, RuntimeStats
@@ -78,6 +79,29 @@ def test_router_builds_short_queue_runtime_policy(tmp_path):
     policy = build_policy(config)
 
     assert isinstance(policy._delegate, ShortQueueRuntimePolicy)
+
+
+def test_router_builds_round_robin_policy(tmp_path):
+    """Router should construct round_robin delegate when configured."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            policy:
+              baseline:
+                algorithm: round_robin
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+    policy = build_policy(config)
+
+    assert isinstance(policy._delegate, RoundRobinPolicy)
 
 
 def test_router_builds_estimated_completion_time_policy(tmp_path):

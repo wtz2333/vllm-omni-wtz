@@ -27,7 +27,7 @@ scheduler:
 
 policy:
   baseline:
-    algorithm: fcfs  # fcfs | short_queue_runtime | estimated_completion_time
+    algorithm: fcfs  # fcfs | round_robin | short_queue_runtime | estimated_completion_time
 
 instances:
   - id: worker-0
@@ -161,6 +161,7 @@ curl -sS -X POST http://127.0.0.1:8089/instances/probe
 通过 YAML 配置：
 
 - `policy.baseline.algorithm=fcfs`
+- `policy.baseline.algorithm=round_robin`
 - `policy.baseline.algorithm=short_queue_runtime`
 - `policy.baseline.algorithm=estimated_completion_time`
 
