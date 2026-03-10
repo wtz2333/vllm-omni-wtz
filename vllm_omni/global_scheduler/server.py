@@ -343,19 +343,6 @@ def create_app(
     app.state.reload_in_progress = False
     app.state.lifecycle_operation_locks: dict[str, asyncio.Lock] = {}
     app.state.lifecycle_operation_locks_guard = RLock()
-    instance_specs = _to_instance_specs(config)
-    app.state.runtime_state_store = RuntimeStateStore(
-        instances=instance_specs,
-        ewma_alpha=config.scheduler.ewma_alpha,
-    )
-    app.state.instance_lifecycle_manager = InstanceLifecycleManager(instance_specs)
-    app.state.policy = build_policy(config)
-    app.state.config_loader = config_loader
-    app.state.health_probe_task = None
-    app.state.process_controller = process_controller or LocalProcessController()
-    app.state.reload_in_progress = False
-    app.state.lifecycle_operation_locks = {}
-    app.state.lifecycle_operation_locks_guard = RLock()
 
     @app.get("/health")
     async def health() -> JSONResponse:
