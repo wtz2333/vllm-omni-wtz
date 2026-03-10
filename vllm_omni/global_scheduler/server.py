@@ -14,8 +14,6 @@ import uuid
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 import httpx
 import uvicorn
@@ -449,11 +447,6 @@ def create_app(
 
     @app.post("/instances/probe")
     async def probe_instances() -> JSONResponse:
-        current_config = getattr(app.state, "global_scheduler_config", config)
-        await asyncio.to_thread(
-            app.state.instance_lifecycle_manager.probe_all,
-            current_config.server.instance_health_check_timeout_s,
-        )
         current_config = getattr(app.state, "global_scheduler_config", config)
         await asyncio.to_thread(
             app.state.instance_lifecycle_manager.probe_all,
@@ -914,23 +907,12 @@ def run_server(config_path: str) -> None:
     Args:
         config_path: Path to scheduler YAML config.
     """
-    """Run scheduler API server from YAML config path.
-
-    Args:
-        config_path: Path to scheduler YAML config.
-    """
     config = load_config(config_path)
-    app = create_app(config, config_loader=lambda: load_config(config_path))
     app = create_app(config, config_loader=lambda: load_config(config_path))
     uvicorn.run(app, host=config.server.host, port=config.server.port)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    """Build CLI parser for scheduler standalone server entrypoint.
-
-    Returns:
-        Argument parser with scheduler server options.
-    """
     """Build CLI parser for scheduler standalone server entrypoint.
 
     Returns:
@@ -942,7 +924,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
-    """CLI entrypoint for standalone global scheduler server."""
     """CLI entrypoint for standalone global scheduler server."""
     args = build_arg_parser().parse_args()
     run_server(args.config)
