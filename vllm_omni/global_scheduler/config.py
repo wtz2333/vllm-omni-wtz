@@ -10,6 +10,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 class ServerConfig(BaseModel):
     """Top-level scheduler server settings."""
 
+    """Top-level scheduler server settings."""
+
     model_config = ConfigDict(extra="forbid")
 
     host: str = "0.0.0.0"
@@ -22,6 +24,8 @@ class ServerConfig(BaseModel):
 
 
 class SchedulerConfig(BaseModel):
+    """Global scheduler runtime tuning parameters."""
+
     """Global scheduler runtime tuning parameters."""
 
     model_config = ConfigDict(extra="forbid")
@@ -40,15 +44,22 @@ class SchedulerConfig(BaseModel):
 class BaselinePolicyConfig(BaseModel):
     """Baseline policy family configuration."""
 
+    """Baseline policy family configuration."""
+
     model_config = ConfigDict(extra="forbid")
 
     algorithm: str = "fcfs"
+    algorithm: str = "fcfs"
 
+    @field_validator("algorithm")
     @field_validator("algorithm")
     @classmethod
     def validate_algorithm(cls, value: str) -> str:
         if value not in {"fcfs", "short_queue_runtime", "estimated_completion_time"}:
+    def validate_algorithm(cls, value: str) -> str:
+        if value not in {"fcfs", "short_queue_runtime", "estimated_completion_time"}:
             raise ValueError(
+                "policy.baseline.algorithm must be one of: fcfs, short_queue_runtime, estimated_completion_time"
                 "policy.baseline.algorithm must be one of: fcfs, short_queue_runtime, estimated_completion_time"
             )
         return value
@@ -123,6 +134,8 @@ class StopConfig(BaseModel):
 class InstanceConfig(BaseModel):
     """Static upstream instance configuration entry."""
 
+    """Static upstream instance configuration entry."""
+
     model_config = ConfigDict(extra="forbid")
 
     id: str
@@ -153,6 +166,8 @@ class InstanceConfig(BaseModel):
 class GlobalSchedulerConfig(BaseModel):
     """Validated root config object for global scheduler service."""
 
+    """Validated root config object for global scheduler service."""
+
     model_config = ConfigDict(extra="forbid")
 
     server: ServerConfig = Field(default_factory=ServerConfig)
@@ -169,6 +184,14 @@ class GlobalSchedulerConfig(BaseModel):
 
 
 def load_config(config_path: str | Path) -> GlobalSchedulerConfig:
+    """Load and validate global scheduler YAML config.
+
+    Args:
+        config_path: Path to scheduler YAML file.
+
+    Returns:
+        Parsed and validated scheduler config model.
+    """
     """Load and validate global scheduler YAML config.
 
     Args:

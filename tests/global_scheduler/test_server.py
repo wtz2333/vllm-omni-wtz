@@ -15,6 +15,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 def test_health_endpoint_returns_scheduler_and_ok(tmp_path):
     """Health endpoint should report ok when config is present and valid."""
+    """Health endpoint should report ok when config is present and valid."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -44,6 +45,7 @@ def test_health_endpoint_returns_scheduler_and_ok(tmp_path):
 
 def test_health_endpoint_returns_503_when_config_missing(tmp_path):
     """Health endpoint should degrade when app config is missing."""
+    """Health endpoint should degrade when app config is missing."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -72,6 +74,7 @@ def test_health_endpoint_returns_503_when_config_missing(tmp_path):
 
 def test_load_config_missing_file_raises_clear_error(tmp_path):
     """Missing config file should produce a clear validation error."""
+    """Missing config file should produce a clear validation error."""
     missing = tmp_path / "not_found.yaml"
 
     with pytest.raises(ValueError, match="Config file not found"):
@@ -79,6 +82,7 @@ def test_load_config_missing_file_raises_clear_error(tmp_path):
 
 
 def test_instance_lifecycle_control_endpoints(tmp_path):
+    """Enable/disable endpoints should update routable state as expected."""
     """Enable/disable endpoints should update routable state as expected."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
@@ -119,6 +123,7 @@ def test_instance_lifecycle_control_endpoints(tmp_path):
 
 
 def test_reload_endpoint_replaces_instance_set(tmp_path):
+    """Reload endpoint should reconcile and replace configured instances."""
     """Reload endpoint should reconcile and replace configured instances."""
     initial_path = tmp_path / "scheduler.yaml"
     reloaded_path = tmp_path / "scheduler_reloaded.yaml"
@@ -165,6 +170,7 @@ def test_reload_endpoint_replaces_instance_set(tmp_path):
 
 
 def test_reload_endpoint_returns_501_without_loader(tmp_path):
+    """Reload endpoint should return 501 when reload loader is not configured."""
     """Reload endpoint should return 501 when reload loader is not configured."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(

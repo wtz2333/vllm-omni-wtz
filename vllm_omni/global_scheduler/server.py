@@ -14,12 +14,15 @@ import uuid
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
+
 
 from vllm_omni.version import __version__
 
@@ -214,6 +217,14 @@ def _build_health_payload(config: Any) -> tuple[int, dict[str, Any]]:
     Returns:
         Tuple of HTTP status code and JSON response payload.
     """
+    """Build health response payload from current app config state.
+
+    Args:
+        config: Current scheduler config object, or None when unavailable.
+
+    Returns:
+        Tuple of HTTP status code and JSON response payload.
+    """
     checks = {
         "config_loaded": isinstance(config, GlobalSchedulerConfig),
         "has_instances": False,
@@ -235,6 +246,14 @@ def _build_health_payload(config: Any) -> tuple[int, dict[str, Any]]:
 
 
 def _to_instance_specs(config: GlobalSchedulerConfig) -> list[InstanceSpec]:
+    """Convert validated config model to instance specs used at runtime.
+
+    Args:
+        config: Global scheduler config.
+
+    Returns:
+        Instance specification list for runtime state components.
+    """
     """Convert validated config model to instance specs used at runtime.
 
     Args:
@@ -297,8 +316,16 @@ def create_app(
                 await asyncio.to_thread(
                     app.state.instance_lifecycle_manager.probe_all,
                     timeout_s,
+                current_config = getattr(app.state, "global_scheduler_config", config)
+                timeout_s = current_config.server.instance_health_check_timeout_s
+                interval_s = current_config.server.instance_health_check_interval_s
+
+                await asyncio.to_thread(
+                    app.state.instance_lifecycle_manager.probe_all,
+                    timeout_s,
                 )
                 app.state.instance_lifecycle_manager.converge_draining(app.state.runtime_state_store.snapshot())
+                await asyncio.sleep(interval_s)
                 await asyncio.sleep(interval_s)
 
         app.state.health_probe_task = asyncio.create_task(_run())
@@ -430,6 +457,11 @@ def create_app(
 
     @app.post("/instances/probe")
     async def probe_instances() -> JSONResponse:
+        current_config = getattr(app.state, "global_scheduler_config", config)
+        await asyncio.to_thread(
+            app.state.instance_lifecycle_manager.probe_all,
+            current_config.server.instance_health_check_timeout_s,
+        )
         current_config = getattr(app.state, "global_scheduler_config", config)
         await asyncio.to_thread(
             app.state.instance_lifecycle_manager.probe_all,
@@ -890,6 +922,11 @@ def run_server(config_path: str) -> None:
     Args:
         config_path: Path to scheduler YAML config.
     """
+    """Run scheduler API server from YAML config path.
+
+    Args:
+        config_path: Path to scheduler YAML config.
+    """
     config = load_config(config_path)
     app = create_app(config, config_loader=lambda: load_config(config_path))
     app = create_app(config, config_loader=lambda: load_config(config_path))
@@ -902,12 +939,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     Returns:
         Argument parser with scheduler server options.
     """
+    """Build CLI parser for scheduler standalone server entrypoint.
+
+    Returns:
+        Argument parser with scheduler server options.
+    """
     parser = argparse.ArgumentParser(description="Run vLLM-Omni global scheduler server")
     parser.add_argument("--config", required=True, help="Path to global scheduler YAML config")
     return parser
 
 
 def main() -> None:
+    """CLI entrypoint for standalone global scheduler server."""
     """CLI entrypoint for standalone global scheduler server."""
     args = build_arg_parser().parse_args()
     run_server(args.config)

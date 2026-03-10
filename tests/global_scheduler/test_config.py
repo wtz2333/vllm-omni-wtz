@@ -1,5 +1,7 @@
 """Config loading and validation tests for global scheduler."""
 
+"""Config loading and validation tests for global scheduler."""
+
 import textwrap
 
 import pytest
@@ -10,6 +12,7 @@ pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 def test_load_config_success(tmp_path):
+    """Config with valid server and instances should load successfully."""
     """Config with valid server and instances should load successfully."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
@@ -36,6 +39,7 @@ def test_load_config_success(tmp_path):
 
 def test_load_config_duplicate_instance_id(tmp_path):
     """Duplicate instance ids should be rejected by config validation."""
+    """Duplicate instance ids should be rejected by config validation."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(
         textwrap.dedent(
@@ -55,6 +59,7 @@ def test_load_config_duplicate_instance_id(tmp_path):
 
 
 def test_load_config_invalid_endpoint(tmp_path):
+    """Only http://host:port endpoints should be accepted."""
     """Only http://host:port endpoints should be accepted."""
     config_path = tmp_path / "scheduler.yaml"
     config_path.write_text(

@@ -1,5 +1,7 @@
 """Lifecycle manager health, draining, and reload behavior tests."""
 
+"""Lifecycle manager health, draining, and reload behavior tests."""
+
 import pytest
 
 from vllm_omni.global_scheduler.lifecycle import InstanceLifecycleManager
@@ -15,6 +17,11 @@ def _instances() -> list[InstanceSpec]:
     Returns:
         Static instance list used by lifecycle state assertions.
     """
+    """Build a deterministic two-instance fixture for lifecycle tests.
+
+    Returns:
+        Static instance list used by lifecycle state assertions.
+    """
     return [
         InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001"),
         InstanceSpec(id="worker-1", endpoint="http://127.0.0.1:9002"),
@@ -22,6 +29,7 @@ def _instances() -> list[InstanceSpec]:
 
 
 def test_unhealthy_or_disabled_instances_are_excluded_from_routable_set():
+    """Routable set should exclude disabled or unhealthy instances."""
     """Routable set should exclude disabled or unhealthy instances."""
     manager = InstanceLifecycleManager(_instances())
 
@@ -40,6 +48,7 @@ def test_unhealthy_or_disabled_instances_are_excluded_from_routable_set():
 
 
 def test_reload_keeps_removed_instance_until_inflight_converges():
+    """Removed instances should remain draining until runtime work converges."""
     """Removed instances should remain draining until runtime work converges."""
     instances = _instances()
     store = RuntimeStateStore(instances=instances)
