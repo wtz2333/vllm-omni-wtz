@@ -211,3 +211,60 @@ def test_stage1_scheduler_slo_first_reorders_waiting_queue():
     assert results["urgent"].metrics["scheduler_policy"] == "slo_first"
     assert results["urgent"].metrics["self_hit"] == 1
     assert results["urgent"].metrics["queue_reorder_count"] == 1
+
+
+def test_stage1_scheduler_sjf_reorders_waiting_queue():
+    sched, req_q, res_q = _make_stage1_scheduler(policy="sjf")
+    enqueue_order: list[str] = []
+    release_first = threading.Event()
+    first_enqueued = threading.Event()
+    second_waiting = threading.Event()
+
+    def _worker():
+        first = req_q.get(timeout=5)
+        enqueue_order.append(first["args"][0].request_ids[0])
+        first_enqueued.set()
+        second_waiting.wait(timeout=5)
+        release_first.wait(timeout=5)
+        res_q.put(DiffusionOutput(output=torch.tensor([0]), request_id="active"))
+
+        for _ in range(2):
+            rpc_request = req_q.get(timeout=5)
+            request_id = rpc_request["args"][0].request_ids[0]
+            enqueue_order.append(request_id)
+            res_q.put(DiffusionOutput(output=torch.tensor([0]), request_id=request_id))
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    results: dict[str, DiffusionOutput] = {}
+
+    active = threading.Thread(
+        target=lambda: results.setdefault("active", sched.add_req(_mock_request("active", num_inference_steps=1))),
+        daemon=True,
+    )
+    long_waiting = threading.Thread(
+        target=lambda: results.setdefault("long", sched.add_req(_mock_request("long", num_inference_steps=20))),
+        daemon=True,
+    )
+    short_waiting = threading.Thread(
+        target=lambda: results.setdefault("short", sched.add_req(_mock_request("short", num_inference_steps=1))),
+        daemon=True,
+    )
+
+    active.start()
+    first_enqueued.wait(timeout=5)
+    long_waiting.start()
+    short_waiting.start()
+    second_waiting.set()
+    release_first.set()
+
+    active.join(5)
+    long_waiting.join(5)
+    short_waiting.join(5)
+    worker.join(5)
+
+    assert enqueue_order == ["active", "short", "long"]
+    assert results["short"].metrics["scheduler_policy"] == "sjf"
+    assert results["short"].metrics["queue_reorder_count"] == 1
+    assert results["short"].metrics["estimated_cost_s"] < results["long"].metrics["estimated_cost_s"]

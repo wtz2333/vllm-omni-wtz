@@ -258,9 +258,10 @@ class OmniServeCommand(CLISubcommand):
             "--instance-scheduler-policy",
             type=str,
             default="fcfs",
-            choices=["fcfs", "slo_first"],
+            choices=["fcfs", "sjf", "slo_first"],
             help="Instance-local diffusion scheduler policy. 'fcfs' preserves arrival order, "
-            "'slo_first' enables deadline-feasible prefix reordering inside a single instance.",
+            "'sjf' orders waiting requests by estimated cost, and 'slo_first' enables "
+            "deadline-feasible prefix reordering inside a single instance.",
         )
         omni_config_group.add_argument(
             "--instance-scheduler-slo-target-ms",

@@ -162,8 +162,36 @@ class Stage1Scheduler(Scheduler):
             regret_drop_count=regret_drop_count,
         )
 
+    def _build_sjf_queue(self, waiting_requests: list[_QueuedRequest], now: float) -> list[_QueuedRequest]:
+        del now
+        return sorted(
+            waiting_requests,
+            key=lambda queued: (
+                self._estimate_cost_seconds(queued.request),
+                queued.enqueue_time,
+                queued.sequence_id,
+            ),
+        )
+
     def _maybe_reorder_waiting_queue(self, new_request: _QueuedRequest, now: float) -> None:
-        if self._policy_name() != "slo_first":
+        policy = self._policy_name()
+        if policy == "fcfs":
+            return
+
+        if policy == "sjf":
+            self._waiting_queue = deque(self._build_sjf_queue(list(self._waiting_queue), now))
+            new_request.schedule_metrics.update(
+                {
+                    "scheduler_policy": "sjf",
+                    "queue_reorder_count": 1,
+                    "estimated_cost_s": self._estimate_cost_seconds(new_request.request),
+                }
+            )
+            logger.info(
+                "QUEUE_REORDER request_id=%s policy=sjf estimated_cost_s=%.4f",
+                self._request_label(new_request.request),
+                new_request.schedule_metrics["estimated_cost_s"],
+            )
             return
 
         waiting_before = list(self._waiting_queue)[:-1]
