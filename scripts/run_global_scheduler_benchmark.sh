@@ -10,7 +10,6 @@ NUM_PROMPTS="${NUM_PROMPTS:-20}"
 REQUEST_RATE="${REQUEST_RATE:-0.1}"
 REQUEST_RATES="${REQUEST_RATES:-0.1,0.2,0.5,1}"
 REQUEST_DURATION_S="${REQUEST_DURATION_S:-1800}"
-STARTED_WORKERS=0
 BENCH_RUNNING=0
 BENCH_PID=""
 _CLEANED_UP=0
@@ -199,13 +198,6 @@ else:
 PY
 }
 
-start_workers() {
-  for wid in ${WORKER_IDS}; do
-    echo "[start] ${wid}"
-    curl_local -fsS -X POST "${SCHEDULER_URL}/instances/${wid}/start" >/dev/null
-  done
-}
-
 stop_workers() {
   for wid in ${WORKER_IDS}; do
     echo "[stop] ${wid}"
@@ -314,7 +306,7 @@ cleanup() {
   _CLEANED_UP=1
 
   terminate_benchmark
-  if [[ "${AUTO_STOP}" == "1" && "${STARTED_WORKERS}" == "1" ]]; then
+  if [[ "${AUTO_STOP}" == "1" ]]; then
     stop_workers
   fi
 }
@@ -464,8 +456,6 @@ main() {
     exit 1
   fi
 
-  start_workers
-  STARTED_WORKERS=1
   wait_workers_routable "${WORKER_READY_TIMEOUT_S}"
   wait_workers_api_ready "${WORKER_READY_TIMEOUT_S}"
 

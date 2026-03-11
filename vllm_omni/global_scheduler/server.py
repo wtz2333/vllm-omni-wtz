@@ -289,6 +289,35 @@ class LifecycleOpResponse(BaseModel):
     log_path: str | None = None
 
 
+async def _auto_start_configured_instances(app: FastAPI) -> None:
+    """Start instances that have lifecycle launch config during server startup."""
+    manager: InstanceLifecycleManager = app.state.instance_lifecycle_manager
+    controller: ProcessController = app.state.process_controller
+
+    snapshot = manager.snapshot()
+    for instance_id, status in snapshot.items():
+        instance_spec = status.instance
+        if instance_spec.launch_executable is None or instance_spec.launch_model is None:
+            continue
+
+        manager.set_process_state(instance_id, process_state="starting", operation="start", error=None)
+        try:
+            await asyncio.to_thread(controller.start, instance_spec)
+        except LifecycleUnsupportedError as exc:
+            manager.set_process_state(instance_id, process_state="error", operation="start", error=str(exc))
+            raise RuntimeError(f"auto-start unsupported for {instance_id}: {exc}") from exc
+        except LifecycleExecutionError as exc:
+            manager.set_process_state(instance_id, process_state="error", operation="start", error=str(exc))
+            raise RuntimeError(f"auto-start failed for {instance_id}: {exc}") from exc
+        except Exception as exc:
+            manager.set_process_state(instance_id, process_state="error", operation="start", error=str(exc))
+            raise RuntimeError(f"auto-start failed for {instance_id}: {exc}") from exc
+
+        manager.set_enabled(instance_id, enabled=True)
+        manager.mark_health(instance_id, healthy=False, error="awaiting_probe_after_start")
+        manager.set_process_state(instance_id, process_state="running", operation="start", error=None)
+
+
 def create_app(
     config: GlobalSchedulerConfig,
     config_loader: Any = None,
@@ -318,6 +347,7 @@ def create_app(
                 app.state.instance_lifecycle_manager.converge_draining(app.state.runtime_state_store.snapshot())
                 await asyncio.sleep(interval_s)
 
+        await _auto_start_configured_instances(app)
         app.state.health_probe_task = asyncio.create_task(_run())
         try:
             yield

@@ -21,7 +21,7 @@ benchmark:
   dataset: trace
   dataset_path: benchmarks/dataset/sd3_trace_redistributed.txt
   max_concurrency: 20
-  warmup_requests: 0
+  warmup_requests: 1
   warmup_num_inference_steps: 1
   output_file: logs/global_scheduler_benchmark_metrics.json
   auto_stop: true
