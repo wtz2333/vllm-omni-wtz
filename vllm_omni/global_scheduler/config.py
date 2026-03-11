@@ -45,10 +45,15 @@ class BaselinePolicyConfig(BaseModel):
     @field_validator("algorithm")
     @classmethod
     def validate_algorithm(cls, value: str) -> str:
-        if value not in {"fcfs", "round_robin", "short_queue_runtime", "estimated_completion_time"}:
+        if value not in {
+            "fcfs",
+            "min_queue_length",
+            "round_robin",
+            "short_queue_runtime",
+            "estimated_completion_time",
+        }:
             raise ValueError(
-                "policy.baseline.algorithm must be one of: fcfs, round_robin, short_queue_runtime, estimated_completion_time"
-                "policy.baseline.algorithm must be one of: fcfs, round_robin, short_queue_runtime, estimated_completion_time"
+                "policy.baseline.algorithm must be one of: fcfs, min_queue_length, round_robin, short_queue_runtime, estimated_completion_time"
             )
         return value
 

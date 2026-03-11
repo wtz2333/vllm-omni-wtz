@@ -28,7 +28,7 @@ scheduler:
 
 policy:
   baseline:
-    algorithm: fcfs  # fcfs | round_robin | short_queue_runtime | estimated_completion_time
+    algorithm: fcfs  # fcfs | min_queue_length | round_robin | short_queue_runtime | estimated_completion_time
 
 instances:
   - id: worker-0
@@ -162,6 +162,7 @@ Notes:
 Set in YAML:
 
 - `policy.baseline.algorithm=fcfs`
+- `policy.baseline.algorithm=min_queue_length`
 - `policy.baseline.algorithm=round_robin`
 - `policy.baseline.algorithm=short_queue_runtime`
 - `policy.baseline.algorithm=estimated_completion_time`

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .estimated_completion_time import EstimatedCompletionTimePolicy
 from .first_come_first_served import FirstComeFirstServedPolicy
+from .min_queue_length import MinQueueLengthPolicy
 from .policy_base import PolicyBase
 from .round_robin import RoundRobinPolicy
 from .runtime_estimator import RuntimeEstimator
@@ -24,6 +25,8 @@ class AlgorithmPolicyRouter(PolicyBase):
         self._delegate: PolicyBase
         if algorithm == "fcfs":
             self._delegate = FirstComeFirstServedPolicy(tie_breaker=tie_breaker)
+        elif algorithm == "min_queue_length":
+            self._delegate = MinQueueLengthPolicy(tie_breaker=tie_breaker)
         elif algorithm == "round_robin":
             self._delegate = RoundRobinPolicy(tie_breaker=tie_breaker)
         elif algorithm == "short_queue_runtime":
@@ -38,7 +41,7 @@ class AlgorithmPolicyRouter(PolicyBase):
             )
         else:
             raise ValueError(
-                "Unsupported baseline algorithm. expected one of: fcfs, round_robin, short_queue_runtime, estimated_completion_time"
+                "Unsupported baseline algorithm. expected one of: fcfs, min_queue_length, round_robin, short_queue_runtime, estimated_completion_time"
             )
 
     def select_instance(

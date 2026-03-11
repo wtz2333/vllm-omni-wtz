@@ -158,6 +158,28 @@ def test_load_config_short_queue_runtime_algorithm(tmp_path):
     assert config.policy.baseline.algorithm == "short_queue_runtime"
 
 
+def test_load_config_min_queue_length_algorithm(tmp_path):
+    """min_queue_length should be accepted as a baseline algorithm."""
+    config_path = tmp_path / "scheduler.yaml"
+    config_path.write_text(
+        textwrap.dedent(
+            """
+            policy:
+              baseline:
+                algorithm: min_queue_length
+            instances:
+              - id: worker-0
+                endpoint: http://127.0.0.1:9001
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(config_path)
+
+    assert config.policy.baseline.algorithm == "min_queue_length"
+
+
 def test_load_config_round_robin_algorithm(tmp_path):
     """round_robin should be accepted as a baseline algorithm."""
     config_path = tmp_path / "scheduler.yaml"
