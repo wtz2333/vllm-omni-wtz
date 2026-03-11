@@ -8,8 +8,8 @@ set -euo pipefail
 
 NUM_PROMPTS="${NUM_PROMPTS:-20}"
 REQUEST_RATE="${REQUEST_RATE:-0.1}"
-REQUEST_RATES="${REQUEST_RATES:-0.1,0.2,0.5,1}"
-REQUEST_DURATION_S="${REQUEST_DURATION_S:-1800}"
+REQUEST_RATES="${REQUEST_RATES:-0.5}"
+REQUEST_DURATION_S="${REQUEST_DURATION_S:-40}"
 BENCH_RUNNING=0
 BENCH_PID=""
 _CLEANED_UP=0
@@ -344,33 +344,34 @@ wait_workers_routable() {
 
 is_worker_api_ready() {
   local endpoint="$1"
-  local tmp_body
-  local status
-  local payload
-  tmp_body="$(mktemp)"
-  payload="$(cat <<EOF
-{"model":"${MODEL}","messages":[{"role":"user","content":"ready-check"}],"extra_body":{"width":64,"height":64,"num_inference_steps":1}}
-EOF
-)"
+  local models_json
+  models_json="$(curl_local -fsS --max-time 30 "${endpoint%/}/v1/models" || true)"
+  if [[ -z "${models_json}" ]]; then
+    echo "0"
+    return 0
+  fi
 
-  status="$(
-    curl_local -sS --max-time 30 -o "${tmp_body}" -w "%{http_code}" \
-      -X POST "${endpoint%/}/v1/chat/completions" \
-      -H 'Content-Type: application/json' \
-      -d "${payload}" || true
-  )"
-  if [[ "${status}" == "200" ]]; then
-    rm -f "${tmp_body}"
-    echo "1"
-    return 0
-  fi
-  if grep -qi "model.*not found" "${tmp_body}" 2>/dev/null; then
-    rm -f "${tmp_body}"
-    echo "MODEL_NOT_FOUND"
-    return 0
-  fi
-  rm -f "${tmp_body}"
-  echo "0"
+  MODELS_JSON="${models_json}" python3 - <<'PY'
+import json
+import os
+
+raw = os.environ.get("MODELS_JSON", "")
+if not raw:
+    print("0")
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError:
+    print("0")
+    raise SystemExit(0)
+
+models = payload.get("data")
+if isinstance(models, list) and len(models) > 0:
+    print("1")
+else:
+    print("0")
+PY
 }
 
 wait_workers_api_ready() {
@@ -386,12 +387,8 @@ wait_workers_api_ready() {
       if [[ -n "${endpoint}" ]]; then
         ready="$(is_worker_api_ready "${endpoint}")"
         if [[ "${ready}" == "1" ]]; then
-          echo "[ready] ${wid} api ready: ${endpoint%/}/v1/chat/completions"
+          echo "[ready] ${wid} api ready: ${endpoint%/}/v1/models"
           break
-        fi
-        if [[ "${ready}" == "MODEL_NOT_FOUND" ]]; then
-          echo "Model not found on ${wid}: MODEL=${MODEL}" >&2
-          return 1
         fi
       fi
       if (( $(date +%s) - start_ts > timeout_s )); then
