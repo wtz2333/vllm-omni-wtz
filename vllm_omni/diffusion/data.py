@@ -613,6 +613,9 @@ class DiffusionOutput:
     trajectory_latents: torch.Tensor | None = None
     trajectory_decoded: list[torch.Tensor] | None = None
     error: str | None = None
+    error_code: str | None = None
+    request_id: str | None = None
+    metrics: dict[str, Any] = field(default_factory=dict)
 
     post_process_func: Callable[..., Any] | None = None
 

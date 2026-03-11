@@ -68,6 +68,7 @@ class DiffusionEngine:
 
     def step(self, request: OmniDiffusionRequest) -> list[OmniRequestOutput]:
         # Apply pre-processing if available
+        scheduler_metrics: dict[str, Any] = {}
         if self.pre_process_func is not None:
             preprocess_start_time = time.time()
             request = self.pre_process_func(request)
@@ -75,8 +76,11 @@ class DiffusionEngine:
             logger.info(f"Pre-processing completed in {preprocess_time:.4f} seconds")
 
         output = self.add_req_and_wait_for_response(request)
+        scheduler_metrics = dict(getattr(output, "metrics", {}) or {})
         if output.error:
-            raise Exception(f"{output.error}")
+            error_code = getattr(output, "error_code", None) or "REQUEST_EXEC_FAILED"
+            request_label = getattr(output, "request_id", None) or ",".join(getattr(request, "request_ids", []) or [])
+            raise RuntimeError(f"[{error_code}] request_id={request_label} {output.error}")
         logger.info("Generation completed successfully.")
 
         if output.output is None:
@@ -107,6 +111,7 @@ class DiffusionEngine:
             "resolution": int(request.sampling_params.resolution),
             "postprocess_time_ms": postprocess_time * 1000,
         }
+        metrics.update(scheduler_metrics)
         if self.pre_process_func is not None:
             metrics["preprocessing_time_ms"] = preprocess_time * 1000
 
