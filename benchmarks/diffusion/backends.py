@@ -39,6 +39,32 @@ class RequestFuncOutput:
     slo_achieved: bool | None = None
 
 
+def _summarize_response_body(resp_json: dict[str, Any]) -> dict[str, Any]:
+    """Keep only small metadata needed for debugging and metrics.
+
+    Full generation payloads can contain large base64 images/videos and will
+    quickly exhaust RAM during long benchmark runs.
+    """
+    summary: dict[str, Any] = {}
+
+    if "peak_memory_mb" in resp_json:
+        summary["peak_memory_mb"] = resp_json["peak_memory_mb"]
+
+    usage = resp_json.get("usage")
+    if isinstance(usage, dict):
+        summary["usage"] = usage
+
+    data = resp_json.get("data")
+    if isinstance(data, list):
+        summary["data_count"] = len(data)
+
+    choices = resp_json.get("choices")
+    if isinstance(choices, list):
+        summary["choices_count"] = len(choices)
+
+    return summary
+
+
 def _guess_mime_type(path: str) -> str:
     mime, _ = mimetypes.guess_type(path)
     return mime or "application/octet-stream"
@@ -104,7 +130,7 @@ async def async_request_chat_completions(
         async with session.post(input.api_url, json=payload) as response:
             if response.status == 200:
                 resp_json = await response.json()
-                output.response_body = resp_json
+                output.response_body = _summarize_response_body(resp_json)
                 output.success = True
                 if "peak_memory_mb" in resp_json:
                     output.peak_memory_mb = resp_json["peak_memory_mb"]
@@ -170,7 +196,7 @@ async def async_request_openai_images(
         async with session.post(input.api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 resp_json = await response.json()
-                output.response_body = resp_json
+                output.response_body = _summarize_response_body(resp_json)
                 output.success = True
                 # Check for usage/memory info if available
                 if "usage" in resp_json and "peak_memory_mb" in resp_json.get("usage", {}):
@@ -192,7 +218,74 @@ async def async_request_openai_images(
     return output
 
 
+async def async_request_v1_videos(
+    input: RequestFuncInput,
+    session: aiohttp.ClientSession,
+    pbar: tqdm | None = None,
+) -> RequestFuncOutput:
+    output = RequestFuncOutput()
+    output.start_time = time.perf_counter()
+
+    files = dict(input.extra_body)
+    if input.prompt:
+        files.setdefault("prompt", input.prompt)
+    if input.width and input.height:
+        files.setdefault("height", input.height)
+        files.setdefault("width", input.width)
+    if input.num_frames:
+        files.setdefault("num_frames", input.num_frames)
+    if input.num_inference_steps:
+        files.setdefault("num_inference_steps", input.num_inference_steps)
+    if input.seed is not None:
+        files.setdefault("seed", input.seed)
+    if input.fps:
+        files.setdefault("fps", input.fps)
+
+    form = aiohttp.FormData()
+    for k, v in files.items():
+        form.add_field(k, str(v))
+
+    image_file = None
+    if input.image_paths and len(input.image_paths) > 0:
+        image_path = input.image_paths[0]
+        image_file = open(image_path, "rb")
+        form.add_field(
+            "input_reference",
+            image_file,
+            filename=os.path.basename(image_path),
+            content_type="application/octet-stream",
+        )
+
+    try:
+        async with session.post(input.api_url, data=form) as response:
+            if response.status == 200:
+                resp_json = await response.json()
+                output.response_body = _summarize_response_body(resp_json)
+                output.success = True
+                if "peak_memory_mb" in resp_json:
+                    output.peak_memory_mb = resp_json["peak_memory_mb"]
+            else:
+                output.error = f"HTTP {response.status}: {await response.text()}"
+                output.success = False
+    except Exception as e:
+        output.error = str(e)
+        output.success = False
+    finally:
+        if image_file is not None:
+            image_file.close()
+
+    output.latency = time.perf_counter() - output.start_time
+
+    if output.success and input.slo_ms is not None:
+        output.slo_achieved = (output.latency * 1000.0) <= float(input.slo_ms)
+
+    if pbar:
+        pbar.update(1)
+    return output
+
+
 backends_function_mapping = {
     "vllm-omni": (async_request_chat_completions, "/v1/chat/completions"),
     "openai": (async_request_openai_images, "/v1/images/generations"),
+    "v1/videos": (async_request_v1_videos, "/v1/videos"),
 }

@@ -5,6 +5,8 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 import json
 import logging
 import socket
@@ -59,6 +61,37 @@ class UpstreamResult(BaseModel):
 _NO_PROXY_OPENER = urllib_request.build_opener(urllib_request.ProxyHandler({}))
 
 
+async def _stop_managed_instances_on_shutdown(app: FastAPI) -> None:
+    """Best-effort stop for instances managed through scheduler lifecycle."""
+    manager: InstanceLifecycleManager = app.state.instance_lifecycle_manager
+    controller: ProcessController = app.state.process_controller
+
+    for instance_id, status in manager.snapshot().items():
+        instance = status.instance
+        if instance.stop_executable is None or status.process_state == "stopped":
+            continue
+
+        manager.set_enabled(instance_id, enabled=False)
+        manager.set_process_state(instance_id, process_state="stopping", operation="stop", error=None)
+        try:
+            await asyncio.to_thread(controller.stop, instance)
+        except LifecycleUnsupportedError as exc:
+            manager.set_process_state(instance_id, process_state="error", operation="stop", error=str(exc))
+            logger.warning("shutdown.stop unsupported instance_id=%s error=%s", instance_id, exc)
+            continue
+        except LifecycleExecutionError as exc:
+            manager.set_process_state(instance_id, process_state="error", operation="stop", error=str(exc))
+            logger.warning("shutdown.stop failed instance_id=%s error=%s", instance_id, exc)
+            continue
+        except Exception as exc:
+            manager.set_process_state(instance_id, process_state="error", operation="stop", error=str(exc))
+            logger.exception("shutdown.stop unexpected_error instance_id=%s", instance_id)
+            continue
+
+        manager.mark_health(instance_id, healthy=False, error="stopped_on_shutdown")
+        manager.set_process_state(instance_id, process_state="stopped", operation="stop", error=None)
+
+
 def _build_error_payload(code: str, message: str, request_id: str) -> dict[str, Any]:
     """Build normalized error body following GS_* contract.
 
@@ -79,8 +112,28 @@ def _build_error_payload(code: str, message: str, request_id: str) -> dict[str, 
     }
 
 
-def _extract_request_meta(payload: dict[str, Any], request_id: str) -> RequestMeta:
-    """Extract scheduler metadata from OpenAI-compatible request payload.
+def _coerce_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_openai_size(size: Any) -> tuple[int | None, int | None]:
+    if not isinstance(size, str):
+        return None, None
+    parts = size.lower().split("x", 1)
+    if len(parts) != 2:
+        return None, None
+    return _coerce_int(parts[0]), _coerce_int(parts[1])
+
+
+def _extract_request_meta_from_payload(payload: dict[str, Any], request_id: str) -> RequestMeta:
+    """Extract scheduler metadata from JSON request payload.
 
     Args:
         payload: JSON payload from incoming request body.
@@ -91,12 +144,69 @@ def _extract_request_meta(payload: dict[str, Any], request_id: str) -> RequestMe
     """
     extra_body = payload.get("extra_body") if isinstance(payload.get("extra_body"), dict) else {}
 
+    width = _coerce_int(extra_body.get("width"))
+    height = _coerce_int(extra_body.get("height"))
+    num_frames = _coerce_int(extra_body.get("num_frames"))
+    num_inference_steps = _coerce_int(extra_body.get("num_inference_steps"))
+
+    if width is None:
+        width = _coerce_int(payload.get("width"))
+    if height is None:
+        height = _coerce_int(payload.get("height"))
+    if num_frames is None:
+        num_frames = _coerce_int(payload.get("num_frames"))
+    if num_inference_steps is None:
+        num_inference_steps = _coerce_int(payload.get("num_inference_steps"))
+
+    if width is None or height is None:
+        parsed_width, parsed_height = _parse_openai_size(payload.get("size"))
+        if width is None:
+            width = parsed_width
+        if height is None:
+            height = parsed_height
+
     return RequestMeta(
         request_id=request_id,
-        width=extra_body.get("width"),
-        height=extra_body.get("height"),
-        num_frames=extra_body.get("num_frames"),
-        num_inference_steps=extra_body.get("num_inference_steps"),
+        width=width,
+        height=height,
+        num_frames=num_frames,
+        num_inference_steps=num_inference_steps,
+    )
+
+
+def _extract_multipart_form_fields(body: bytes, content_type: str | None) -> dict[str, str]:
+    if not body or not content_type or "multipart/form-data" not in content_type.lower():
+        return {}
+
+    mime_message = (
+        f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode("utf-8")
+        + body
+    )
+    message = BytesParser(policy=email_default_policy).parsebytes(mime_message)
+    if not message.is_multipart():
+        return {}
+
+    fields: dict[str, str] = {}
+    for part in message.iter_parts():
+        if part.get_content_disposition() != "form-data":
+            continue
+        field_name = part.get_param("name", header="content-disposition")
+        if not field_name or part.get_filename() is not None:
+            continue
+        value = part.get_content()
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        fields[field_name] = str(value).strip()
+    return fields
+
+
+def _extract_request_meta_from_form_fields(form_fields: dict[str, str], request_id: str) -> RequestMeta:
+    return RequestMeta(
+        request_id=request_id,
+        width=_coerce_int(form_fields.get("width")),
+        height=_coerce_int(form_fields.get("height")),
+        num_frames=_coerce_int(form_fields.get("num_frames")),
+        num_inference_steps=_coerce_int(form_fields.get("num_inference_steps")),
     )
 
 
@@ -135,7 +245,34 @@ def _proxy_chat_completion(
         OSError: Network-level transport failure.
         UpstreamHTTPError: Upstream returned non-2xx response.
     """
-    url = f"{endpoint}/v1/chat/completions"
+    return _proxy_request(endpoint, "/v1/chat/completions", body, headers, timeout_s)
+
+
+def _proxy_request(
+    endpoint: str,
+    upstream_path: str,
+    body: bytes,
+    headers: dict[str, str],
+    timeout_s: int,
+) -> UpstreamResult:
+    """Forward POST request to one upstream endpoint.
+
+    Args:
+        endpoint: Base upstream endpoint.
+        upstream_path: Upstream HTTP path to forward to.
+        body: Serialized request body.
+        headers: Forwarded HTTP headers.
+        timeout_s: Upstream request timeout in seconds.
+
+    Returns:
+        Upstream status/body/headers on success.
+
+    Raises:
+        TimeoutError: Upstream timeout.
+        OSError: Network-level transport failure.
+        UpstreamHTTPError: Upstream returned non-2xx response.
+    """
+    url = f"{endpoint}{upstream_path}"
     request = urllib_request.Request(url=url, data=body, headers=headers, method="POST")
 
     try:
@@ -167,9 +304,10 @@ async def _open_streaming_upstream(
     body: bytes,
     headers: dict[str, str],
     timeout_s: int,
+    upstream_path: str = "/v1/chat/completions",
 ) -> tuple[int, dict[str, str], str | None, AsyncIterator[bytes]]:
     """Open upstream event stream and expose status/headers/body iterator."""
-    url = f"{endpoint}/v1/chat/completions"
+    url = f"{endpoint}{upstream_path}"
     timeout = httpx.Timeout(timeout=timeout_s)
     client = httpx.AsyncClient(timeout=timeout, trust_env=False)
     stream_ctx = client.stream("POST", url=url, content=body, headers=headers)
@@ -358,6 +496,7 @@ def create_app(
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+            await _stop_managed_instances_on_shutdown(app)
 
     app = FastAPI(title="vLLM-Omni Global Scheduler", version=__version__, lifespan=lifespan)
     app.state.global_scheduler_config = config
@@ -402,7 +541,12 @@ def create_app(
                     "last_operation_ts_s": lifecycle.last_operation_ts_s,
                     "last_operation_error": lifecycle.last_operation_error,
                     "log_path": get_instance_log_path(instance_id),
-                    "routable": lifecycle.enabled and lifecycle.healthy and not lifecycle.draining,
+                    "routable": (
+                        lifecycle.enabled
+                        and lifecycle.healthy
+                        and not lifecycle.draining
+                        and lifecycle.process_state == "running"
+                    ),
                     "queue_len": stats.queue_len if stats else 0,
                     "inflight": stats.inflight if stats else 0,
                     "ewma_service_time_s": stats.ewma_service_time_s if stats else None,
@@ -641,7 +785,7 @@ def create_app(
     async def chat_completions(request: Request) -> Response:
         payload = await request.json()
         request_id = request.headers.get("x-request-id") or payload.get("request_id") or str(uuid.uuid4())
-        request_meta = _extract_request_meta(payload, request_id=request_id)
+        request_meta = _extract_request_meta_from_payload(payload, request_id=request_id)
         runtime_snapshot = app.state.runtime_state_store.snapshot()
         candidates = app.state.instance_lifecycle_manager.get_routable_instances()
         if not candidates:
@@ -911,6 +1055,229 @@ def create_app(
             app.state.runtime_state_store.on_request_finish(
                 decision.instance_id,
                 latency_s=elapsed_s,
+                ok=ok,
+            )
+
+        return _attach_route_headers(response)
+
+    @app.post("/v1/images/generations")
+    async def image_generations(request: Request) -> Response:
+        payload = await request.json()
+        request_id = request.headers.get("x-request-id") or payload.get("request_id") or str(uuid.uuid4())
+        request_meta = _extract_request_meta_from_payload(payload, request_id=request_id)
+        runtime_snapshot = app.state.runtime_state_store.snapshot()
+        candidates = app.state.instance_lifecycle_manager.get_routable_instances()
+        if not candidates:
+            return JSONResponse(
+                status_code=503,
+                content=_build_error_payload(
+                    code="GS_NO_ROUTABLE_INSTANCE",
+                    message="No routable instance is available",
+                    request_id=request_id,
+                ),
+            )
+
+        try:
+            decision = app.state.policy.select_instance(
+                request=request_meta,
+                instances=candidates,
+                runtime_stats=runtime_snapshot,
+            )
+        except (ValueError, KeyError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content=_build_error_payload(
+                    code="GS_NO_ROUTABLE_INSTANCE",
+                    message=str(exc),
+                    request_id=request_id,
+                ),
+            )
+
+        app.state.runtime_state_store.on_request_start(decision.instance_id)
+        started_at = time.monotonic()
+        current_config = getattr(app.state, "global_scheduler_config", config)
+        filtered_headers = _filter_forward_headers(request.headers)
+        payload_bytes = json.dumps(payload).encode("utf-8")
+
+        logger.info(
+            "request.start request_id=%s model=%s stream=%s path=%s candidates=%s selected=%s endpoint=%s",
+            request_id,
+            payload.get("model") if isinstance(payload, dict) else None,
+            False,
+            "/v1/images/generations",
+            len(candidates),
+            decision.instance_id,
+            decision.endpoint,
+        )
+
+        def _attach_route_headers(resp: Response) -> Response:
+            resp.headers["X-Routed-Instance"] = decision.instance_id
+            resp.headers["X-Route-Reason"] = decision.reason
+            resp.headers["X-Route-Score"] = str(decision.score)
+            return resp
+
+        response: Response
+        ok = False
+        try:
+            upstream_result = await asyncio.to_thread(
+                _proxy_request,
+                decision.endpoint,
+                "/v1/images/generations",
+                payload_bytes,
+                filtered_headers,
+                current_config.server.request_timeout_s,
+            )
+            response = Response(
+                status_code=upstream_result.status_code,
+                content=upstream_result.body,
+                media_type=upstream_result.headers.get("content-type") or "application/json",
+            )
+            for key, value in _select_upstream_response_headers(upstream_result.headers).items():
+                response.headers[key] = value
+            ok = True
+        except UpstreamHTTPError as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_HTTP_ERROR",
+                    message=f"Upstream returned HTTP {exc.status_code}",
+                    request_id=request_id,
+                ),
+            )
+        except TimeoutError:
+            response = JSONResponse(
+                status_code=502,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_TIMEOUT",
+                    message="Upstream request timed out",
+                    request_id=request_id,
+                ),
+            )
+        except OSError as exc:
+            response = JSONResponse(
+                status_code=502,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_NETWORK_ERROR",
+                    message=str(exc),
+                    request_id=request_id,
+                ),
+            )
+        finally:
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
+                ok=ok,
+            )
+
+        return _attach_route_headers(response)
+
+    @app.post("/v1/videos")
+    async def videos(request: Request) -> Response:
+        payload_bytes = await request.body()
+        form_fields = _extract_multipart_form_fields(payload_bytes, request.headers.get("content-type"))
+        request_id = request.headers.get("x-request-id") or form_fields.get("request_id") or str(uuid.uuid4())
+        request_meta = _extract_request_meta_from_form_fields(form_fields, request_id=request_id)
+
+        runtime_snapshot = app.state.runtime_state_store.snapshot()
+        candidates = app.state.instance_lifecycle_manager.get_routable_instances()
+        if not candidates:
+            return JSONResponse(
+                status_code=503,
+                content=_build_error_payload(
+                    code="GS_NO_ROUTABLE_INSTANCE",
+                    message="No routable instance is available",
+                    request_id=request_id,
+                ),
+            )
+
+        try:
+            decision = app.state.policy.select_instance(
+                request=request_meta,
+                instances=candidates,
+                runtime_stats=runtime_snapshot,
+            )
+        except (ValueError, KeyError) as exc:
+            return JSONResponse(
+                status_code=503,
+                content=_build_error_payload(
+                    code="GS_NO_ROUTABLE_INSTANCE",
+                    message=str(exc),
+                    request_id=request_id,
+                ),
+            )
+
+        app.state.runtime_state_store.on_request_start(decision.instance_id)
+        started_at = time.monotonic()
+        current_config = getattr(app.state, "global_scheduler_config", config)
+        filtered_headers = _filter_forward_headers(request.headers)
+
+        logger.info(
+            "request.start request_id=%s model=%s stream=%s path=%s candidates=%s selected=%s endpoint=%s",
+            request_id,
+            form_fields.get("model"),
+            False,
+            "/v1/videos",
+            len(candidates),
+            decision.instance_id,
+            decision.endpoint,
+        )
+
+        def _attach_route_headers(resp: Response) -> Response:
+            resp.headers["X-Routed-Instance"] = decision.instance_id
+            resp.headers["X-Route-Reason"] = decision.reason
+            resp.headers["X-Route-Score"] = str(decision.score)
+            return resp
+
+        response: Response
+        ok = False
+        try:
+            upstream_result = await asyncio.to_thread(
+                _proxy_request,
+                decision.endpoint,
+                "/v1/videos",
+                payload_bytes,
+                filtered_headers,
+                current_config.server.request_timeout_s,
+            )
+            response = Response(
+                status_code=upstream_result.status_code,
+                content=upstream_result.body,
+                media_type=upstream_result.headers.get("content-type") or "application/json",
+            )
+            for key, value in _select_upstream_response_headers(upstream_result.headers).items():
+                response.headers[key] = value
+            ok = True
+        except UpstreamHTTPError as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_HTTP_ERROR",
+                    message=f"Upstream returned HTTP {exc.status_code}",
+                    request_id=request_id,
+                ),
+            )
+        except TimeoutError:
+            response = JSONResponse(
+                status_code=502,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_TIMEOUT",
+                    message="Upstream request timed out",
+                    request_id=request_id,
+                ),
+            )
+        except OSError as exc:
+            response = JSONResponse(
+                status_code=502,
+                content=_build_error_payload(
+                    code="GS_UPSTREAM_NETWORK_ERROR",
+                    message=str(exc),
+                    request_id=request_id,
+                ),
+            )
+        finally:
+            app.state.runtime_state_store.on_request_finish(
+                decision.instance_id,
+                latency_s=time.monotonic() - started_at,
                 ok=ok,
             )
 

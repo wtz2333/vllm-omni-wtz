@@ -7,9 +7,9 @@ set -euo pipefail
 # 2) Lifecycle config exists in global_scheduler.yaml for worker ids below.
 
 NUM_PROMPTS="${NUM_PROMPTS:-20}"
-REQUEST_RATE="${REQUEST_RATE:-0.1}"
-REQUEST_RATES="${REQUEST_RATES:-0.5}"
-REQUEST_DURATION_S="${REQUEST_DURATION_S:-40}"
+REQUEST_RATE="${REQUEST_RATE:-0.5}"
+RPS_LIST="${RPS_LIST:-}"
+STARTED_WORKERS=0
 BENCH_RUNNING=0
 BENCH_PID=""
 _CLEANED_UP=0
@@ -90,7 +90,6 @@ values = {
     "WARMUP_REQUESTS": str(benchmark.warmup_requests),
     "WARMUP_NUM_INFERENCE_STEPS": str(benchmark.warmup_num_inference_steps),
     "OUTPUT_FILE": resolve_config_path(benchmark.output_file),
-    "AUTO_STOP": "1" if benchmark.auto_stop else "0",
 }
 
 for key, value in values.items():
@@ -198,6 +197,15 @@ else:
 PY
 }
 
+<<<<<<< Updated upstream
+=======
+start_workers() {
+  for wid in ${WORKER_IDS}; do
+    echo "[start] ${wid}"
+    curl_local -fsS -X POST "${SCHEDULER_URL}/instances/${wid}/start" >/dev/null
+  done
+}
+
 stop_workers() {
   for wid in ${WORKER_IDS}; do
     echo "[stop] ${wid}"
@@ -205,6 +213,7 @@ stop_workers() {
   done
 }
 
+>>>>>>> Stashed changes
 terminate_benchmark() {
   if [[ "${BENCH_RUNNING}" != "1" || -z "${BENCH_PID}" ]]; then
     return 0
@@ -217,88 +226,6 @@ terminate_benchmark() {
   BENCH_PID=""
 }
 
-trim() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "${value}"
-}
-
-parse_request_rates() {
-  local rates_raw="${REQUEST_RATES:-${REQUEST_RATE}}"
-  local normalized=()
-  local token
-  rates_raw="${rates_raw//,/ }"
-  for token in ${rates_raw}; do
-    token="$(trim "${token}")"
-    if [[ -z "${token}" ]]; then
-      continue
-    fi
-    normalized+=("${token}")
-  done
-
-  if [[ "${#normalized[@]}" -eq 0 ]]; then
-    echo "No request rates configured. Set REQUEST_RATE or REQUEST_RATES." >&2
-    return 1
-  fi
-
-  REQUEST_RATE_LIST=("${normalized[@]}")
-}
-
-sanitize_rate_for_filename() {
-  local rate="$1"
-  rate="${rate//./p}"
-  rate="${rate//[^a-zA-Z0-9_-]/_}"
-  printf '%s' "${rate}"
-}
-
-resolve_num_prompts_for_rate() {
-  local rate="$1"
-  if [[ -n "${REQUEST_DURATION_S}" ]]; then
-    python3 - "${rate}" "${REQUEST_DURATION_S}" <<'PY'
-import math
-import sys
-
-rate = float(sys.argv[1])
-duration = float(sys.argv[2])
-if not math.isfinite(rate):
-    raise ValueError("REQUEST_DURATION_S requires a finite request rate")
-if duration <= 0:
-    raise ValueError("REQUEST_DURATION_S must be > 0")
-if rate <= 0:
-    raise ValueError("request rate must be > 0 when REQUEST_DURATION_S is set")
-print(max(1, math.ceil(rate * duration)))
-PY
-    return 0
-  fi
-
-  printf '%s\n' "${NUM_PROMPTS}"
-}
-
-resolve_output_file_for_rate() {
-  local rate="$1"
-  if [[ -z "${OUTPUT_FILE}" ]]; then
-    return 0
-  fi
-
-  if [[ "${#REQUEST_RATE_LIST[@]}" -le 1 ]]; then
-    printf '%s\n' "${OUTPUT_FILE}"
-    return 0
-  fi
-
-  python3 - "${OUTPUT_FILE}" "$(sanitize_rate_for_filename "${rate}")" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-suffix = sys.argv[2]
-if path.suffix:
-    print(str(path.with_name(f"{path.stem}_rps_{suffix}{path.suffix}")))
-else:
-    print(str(path.with_name(f"{path.name}_rps_{suffix}")))
-PY
-}
-
 cleanup() {
   if [[ "${_CLEANED_UP}" == "1" ]]; then
     return 0
@@ -306,9 +233,12 @@ cleanup() {
   _CLEANED_UP=1
 
   terminate_benchmark
-  if [[ "${AUTO_STOP}" == "1" ]]; then
+<<<<<<< Updated upstream
+=======
+  if [[ "${AUTO_STOP}" == "1" && "${STARTED_WORKERS}" == "1" ]]; then
     stop_workers
   fi
+>>>>>>> Stashed changes
 }
 
 on_signal() {
@@ -321,60 +251,38 @@ on_exit() {
   cleanup
 }
 
-wait_workers_routable() {
-  local timeout_s="${1:-120}"
-  local start_ts
-  start_ts="$(date +%s)"
-  for wid in ${WORKER_IDS}; do
-    while true; do
-      local routable
-      routable="$(is_worker_routable "${wid}")"
-      if [[ "${routable}" == "1" ]]; then
-        echo "[ready] ${wid} routable=true"
-        break
-      fi
-      if (( $(date +%s) - start_ts > timeout_s )); then
-        echo "Timeout waiting for worker to become routable: ${wid}" >&2
-        return 1
-      fi
-      sleep 1
-    done
-  done
-}
-
 is_worker_api_ready() {
   local endpoint="$1"
-  local models_json
-  models_json="$(curl_local -fsS --max-time 30 "${endpoint%/}/v1/models" || true)"
-  if [[ -z "${models_json}" ]]; then
-    echo "0"
+  local tmp_body
+  local status
+  local payload
+  tmp_body="$(mktemp)"
+  payload="$(cat <<EOF
+{"model":"${MODEL}","messages":[{"role":"user","content":"ready-check"}],"extra_body":{"width":64,"height":64,"num_inference_steps":1}}
+EOF
+)"
+
+  status="$(
+    curl_local -sS --max-time 30 -o "${tmp_body}" -w "%{http_code}" \
+      -X POST "${endpoint%/}/v1/chat/completions" \
+      -H 'Content-Type: application/json' \
+      -d "${payload}" || true
+  )"
+  if [[ "${status}" == "200" ]]; then
+    rm -f "${tmp_body}"
+    echo "1"
     return 0
   fi
-
-  MODELS_JSON="${models_json}" python3 - <<'PY'
-import json
-import os
-
-raw = os.environ.get("MODELS_JSON", "")
-if not raw:
-    print("0")
-    raise SystemExit(0)
-
-try:
-    payload = json.loads(raw)
-except json.JSONDecodeError:
-    print("0")
-    raise SystemExit(0)
-
-models = payload.get("data")
-if isinstance(models, list) and len(models) > 0:
-    print("1")
-else:
-    print("0")
-PY
+  if grep -qi "model.*not found" "${tmp_body}" 2>/dev/null; then
+    rm -f "${tmp_body}"
+    echo "MODEL_NOT_FOUND"
+    return 0
+  fi
+  rm -f "${tmp_body}"
+  echo "0"
 }
 
-wait_workers_api_ready() {
+wait_workers_ready() {
   local timeout_s="${1:-600}"
 
   for wid in ${WORKER_IDS}; do
@@ -382,17 +290,28 @@ wait_workers_api_ready() {
     start_ts="$(date +%s)"
     while true; do
       local endpoint
+      local routable
       local ready
+      routable="$(is_worker_routable "${wid}")"
       endpoint="$(get_worker_endpoint "${wid}")"
       if [[ -n "${endpoint}" ]]; then
         ready="$(is_worker_api_ready "${endpoint}")"
+<<<<<<< Updated upstream
+        if [[ "${routable}" == "1" && "${ready}" == "1" ]]; then
+          echo "[ready] ${wid} routable=true api_ready=true (${endpoint%/}/v1/models)"
+=======
         if [[ "${ready}" == "1" ]]; then
-          echo "[ready] ${wid} api ready: ${endpoint%/}/v1/models"
+          echo "[ready] ${wid} api ready: ${endpoint%/}/v1/chat/completions"
+>>>>>>> Stashed changes
           break
+        fi
+        if [[ "${ready}" == "MODEL_NOT_FOUND" ]]; then
+          echo "Model not found on ${wid}: MODEL=${MODEL}" >&2
+          return 1
         fi
       fi
       if (( $(date +%s) - start_ts > timeout_s )); then
-        echo "Timeout waiting for worker API ready: ${wid}" >&2
+        echo "Timeout waiting for worker ready (routable + api): ${wid}" >&2
         return 1
       fi
       sleep 2
@@ -400,52 +319,14 @@ wait_workers_api_ready() {
   done
 }
 
-run_benchmark_for_rate() {
-  local rate="$1"
-  local run_num_prompts
-  local run_output_file
-
-  run_num_prompts="$(resolve_num_prompts_for_rate "${rate}")"
-  run_output_file="$(resolve_output_file_for_rate "${rate}")"
-
-  echo "[bench] start benchmark: rate=${rate}, num_prompts=${run_num_prompts}${REQUEST_DURATION_S:+, request_duration_s=${REQUEST_DURATION_S}}"
-  local cmd=(
-    python3 "${BENCH_SCRIPT}"
-    --base-url "${SCHEDULER_URL}"
-    --model "${MODEL}"
-    --task "${TASK}"
-    --dataset "${DATASET}"
-    --num-prompts "${run_num_prompts}"
-    --max-concurrency "${MAX_CONCURRENCY}"
-    --request-rate "${rate}"
-    --warmup-requests "${WARMUP_REQUESTS}"
-    --warmup-num-inference-steps "${WARMUP_NUM_INFERENCE_STEPS}"
-  )
-  if [[ -n "${DATASET_PATH}" ]]; then
-    cmd+=(--dataset-path "${DATASET_PATH}")
-  fi
-  if [[ -n "${run_output_file}" ]]; then
-    cmd+=(--output-file "${run_output_file}")
-  fi
-
-  echo "Running: ${cmd[*]}"
-  "${cmd[@]}" &
-  BENCH_PID="$!"
-  BENCH_RUNNING=1
-  local bench_status=0
-  if ! wait "${BENCH_PID}"; then
-    bench_status=$?
-  fi
-  BENCH_RUNNING=0
-  BENCH_PID=""
-  return "${bench_status}"
+normalize_rps_list() {
+  local raw="$1"
+  echo "$raw" | sed 's/\[//g; s/\]//g; s/,/ /g'
 }
 
 main() {
   trap on_signal INT TERM
   trap on_exit EXIT
-
-  parse_request_rates
 
   echo "[check] scheduler health: ${SCHEDULER_URL}"
   if ! check_scheduler_ready; then
@@ -453,13 +334,80 @@ main() {
     exit 1
   fi
 
+<<<<<<< Updated upstream
+  wait_workers_ready "${WORKER_READY_TIMEOUT_S}"
+=======
+  start_workers
+  STARTED_WORKERS=1
   wait_workers_routable "${WORKER_READY_TIMEOUT_S}"
   wait_workers_api_ready "${WORKER_READY_TIMEOUT_S}"
+>>>>>>> Stashed changes
 
-  local rate
-  for rate in "${REQUEST_RATE_LIST[@]}"; do
-    run_benchmark_for_rate "${rate}"
+  local effective_rps_list
+  if [[ -n "${RPS_LIST}" ]]; then
+    effective_rps_list="${RPS_LIST}"
+  else
+    effective_rps_list="[${REQUEST_RATE}]"
+  fi
+
+  local rps_items
+  rps_items="$(normalize_rps_list "${effective_rps_list}")"
+  if [[ -z "${rps_items}" ]]; then
+    echo "RPS list is empty after parsing: ${effective_rps_list}" >&2
+    return 1
+  fi
+
+  echo "[bench] start benchmark, rps list: ${effective_rps_list}"
+  local bench_status=0
+  local rps
+  for rps in ${rps_items}; do
+    local output_file_for_rps="${OUTPUT_FILE}"
+    if [[ -n "${OUTPUT_FILE}" && "${effective_rps_list}" != "[${REQUEST_RATE}]" ]]; then
+      local base="${OUTPUT_FILE}"
+      local ext=""
+      if [[ "${OUTPUT_FILE}" == *.* ]]; then
+        base="${OUTPUT_FILE%.*}"
+        ext=".${OUTPUT_FILE##*.}"
+      fi
+      local rps_label="${rps//./_}"
+      output_file_for_rps="${base}_rps_${rps_label}${ext}"
+    fi
+
+    echo "[bench] running rps=${rps}, num_prompts=${NUM_PROMPTS}"
+    cmd=(
+      python3 "${BENCH_SCRIPT}"
+      --base-url "${SCHEDULER_URL}"
+      --model "${MODEL}"
+      --task "${TASK}"
+      --dataset "${DATASET}"
+      --num-prompts "${NUM_PROMPTS}"
+      --max-concurrency "${MAX_CONCURRENCY}"
+      --request-rate "${rps}"
+      --warmup-requests "${WARMUP_REQUESTS}"
+      --warmup-num-inference-steps "${WARMUP_NUM_INFERENCE_STEPS}"
+    )
+    if [[ -n "${DATASET_PATH}" ]]; then
+      cmd+=(--dataset-path "${DATASET_PATH}")
+    fi
+    if [[ -n "${output_file_for_rps}" ]]; then
+      cmd+=(--output-file "${output_file_for_rps}")
+    fi
+
+    echo "Running: ${cmd[*]}"
+    "${cmd[@]}" &
+    BENCH_PID="$!"
+    BENCH_RUNNING=1
+    if ! wait "${BENCH_PID}"; then
+      bench_status=$?
+      BENCH_RUNNING=0
+      BENCH_PID=""
+      return "${bench_status}"
+    fi
+    BENCH_RUNNING=0
+    BENCH_PID=""
   done
+
+  return "${bench_status}"
 }
 
 main "$@"

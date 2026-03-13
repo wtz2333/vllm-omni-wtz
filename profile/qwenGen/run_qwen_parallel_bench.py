@@ -11,11 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# python profile/videoGen/run_video_parallel_bench.py --request-types-config /home/mumura/omni/vllm-omni/profile/videoGen/test_req.json   --card-counts 1,2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 1 --request-timeout-seconds 200 --warmup-timeout-seconds 300 --timeout-grace-seconds 20 
-# python profile/videoGen/run_video_parallel_bench.py  --card-counts 2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 3 --request-timeout-seconds 450 --warmup-timeout-seconds 600 --timeout-grace-seconds 20 
+# python profile/qwenGen/run_qwen_parallel_bench.py --request-types-config /home/mumura/omni/vllm-omni/profile/qwenGen/request_types_18.json --card-counts 1,2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 1 --request-timeout-seconds 200 --warmup-timeout-seconds 300 --timeout-grace-seconds 20
+# python profile/qwenGen/run_qwen_parallel_bench.py --card-counts 1,2,4,8 --gpu-device-ids 0,1,2,3,4,5,6,7 --warmup-iters 1 --repeats 3 --request-timeout-seconds 450 --warmup-timeout-seconds 600 --timeout-grace-seconds 20
 
 
-DEFAULT_MODEL = "/data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers"
+DEFAULT_MODEL = "/data2/group_谈海生/mumura/models/Qwen-Image"
 
 
 @dataclass
@@ -58,26 +58,26 @@ class ParallelConfig:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run offline video generation latency profiling across 1/2/4/8 GPU "
-            "parallel configurations and 24 request types."
+            "Run offline Qwen-Image generation latency profiling across 1/2/4/8 GPU "
+            "parallel configurations and configured request types."
         )
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
         "--request-types-config",
-        default="profile/videoGen/request_types_24.json",
+        default="profile/qwenGen/request_types_18.json",
     )
     parser.add_argument(
         "--parallel-matrix-config",
-        default="profile/videoGen/parallel_matrix.json",
+        default="profile/qwenGen/parallel_matrix.json",
     )
     parser.add_argument(
         "--worker-script",
-        default="profile/videoGen/offline_profile_worker.py",
+        default="profile/qwenGen/offline_profile_worker.py",
     )
     parser.add_argument(
         "--output-root",
-        default="profile/videoGen/results",
+        default="profile/qwenGen/results",
     )
     parser.add_argument(
         "--gpu-device-ids",

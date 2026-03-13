@@ -32,7 +32,7 @@ NUM_DEVICES="${NUM_DEVICES:-8}"
 TASK="${TASK:-t2v}"
 DATASET="${DATASET:-random}"
 DATASET_TYPE="${DATASET_TYPE:-C}"
-NUM_PROMPTS_DURATION_SECONDS="${NUM_PROMPTS_DURATION_SECONDS:-10}"
+NUM_PROMPTS_DURATION_SECONDS="${NUM_PROMPTS_DURATION_SECONDS:-100}"
 RPS_LIST="${RPS_LIST:-[0.1]}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-200}"
 BACKEND="${BACKEND:-v1/videos}"
@@ -161,7 +161,7 @@ for t in $(seq 1 7200); do
   sleep 1
 done
 
-# 后台采样设备使用，便于确认服务与压测阶段负载。
+# Background device monitoring to capture server and benchmark load.
 MONITOR_CMD="nvidia-smi"
 if [ "$DEVICE_TYPE" = "npu" ]; then
   MONITOR_CMD="npu-smi info"

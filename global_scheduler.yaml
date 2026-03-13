@@ -15,59 +15,38 @@ policy:
     runtime_profile_path: ./profile/instance_runtime_profile.sample.json
 
 benchmark:
-  worker_ids: [worker-gpu0, worker-gpu1]
+  worker_ids: [worker0]
   worker_ready_timeout_s: 600
-  model: Qwen/Qwen-Image
-  task: t2i
+  model: /data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers
+  task: t2v
   dataset: trace
-  dataset_path: benchmarks/dataset/sd3_trace_redistributed.txt
+  dataset_path: /home/mumura/omni/vllm-omni/benchmarks/dataset/cogvideox_trace_steps_30_40_50.txt
   max_concurrency: 20
-  warmup_requests: 0
+  warmup_requests: 1
   warmup_num_inference_steps: 1
   output_file: logs/global_scheduler_benchmark_metrics.json
   auto_stop: true
 
 instances:
-  - id: worker-gpu0
+  - id: worker0
     endpoint: http://127.0.0.1:8001
-    instance_type: qwen-image-tp1
+    instance_type: wan
     launch:
       executable: vllm
-      model: Qwen/Qwen-Image
+      model: /data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers
       args:
         - --omni
-        - --max-concurrency
-        - "100"
         - --ulysses-degree
-        - "1"
+        - "4"
         - --cfg-parallel-size
-        - "1"
+        - "2"
+        - --use-hsdp
+        - --num-weight-load-threads
+        - "4"
       env:
-        CUDA_VISIBLE_DEVICES: "0"
+        CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
     stop:
       executable: pkill
       args:
         - -f
-        - "vllm serve Qwen/Qwen-Image --port {endpoint_port}"
-
-  - id: worker-gpu1
-    endpoint: http://127.0.0.1:8002
-    instance_type: qwen-image-tp1
-    launch:
-      executable: vllm
-      model: Qwen/Qwen-Image
-      args:
-        - --omni
-        - --max-concurrency
-        - "100"
-        - --ulysses-degree
-        - "1"
-        - --cfg-parallel-size
-        - "1"
-      env:
-        CUDA_VISIBLE_DEVICES: "1"
-    stop:
-      executable: pkill
-      args:
-        - -f
-        - "vllm serve Qwen/Qwen-Image --port {endpoint_port}"
+        - "vllm serve /data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers --port {endpoint_port}"
