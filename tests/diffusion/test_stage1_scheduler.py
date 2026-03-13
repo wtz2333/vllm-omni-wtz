@@ -5,6 +5,7 @@ import queue
 import threading
 from collections import deque
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -366,3 +367,95 @@ def test_stage1_scheduler_estimate_cost_counts_num_outputs_once_without_profile(
     assert single_output_cost == pytest.approx(10.0)
     assert multi_output_cost == pytest.approx(20.0)
     assert multi_output_cost == pytest.approx(single_output_cost * 2.0)
+
+
+def test_stage1_scheduler_reports_waiting_queue_len_and_load():
+    sched, req_q, res_q = _make_stage1_scheduler()
+    release_first = threading.Event()
+    first_enqueued = threading.Event()
+
+    def _worker():
+        first = req_q.get(timeout=5)
+        assert first["args"][0].request_ids[0] == "active"
+        first_enqueued.set()
+        release_first.wait(timeout=5)
+        res_q.put(DiffusionOutput(output=torch.tensor([0]), request_id="active"))
+
+        second = req_q.get(timeout=5)
+        assert second["args"][0].request_ids[0] == "waiting"
+        res_q.put(DiffusionOutput(output=torch.tensor([0]), request_id="waiting"))
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    active = threading.Thread(target=lambda: sched.add_req(_mock_request("active")), daemon=True)
+    waiting = threading.Thread(target=lambda: sched.add_req(_mock_request("waiting")), daemon=True)
+
+    active.start()
+    first_enqueued.wait(timeout=5)
+    waiting.start()
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if sched.estimate_waiting_queue_len() == 1:
+            break
+        time.sleep(0.01)
+
+    assert sched.estimate_waiting_queue_len() == 1
+    assert sched.estimate_scheduler_load() == {
+        "waiting_queue_len": 1,
+        "active_request_count": 1,
+        "paused_context_count": 0,
+    }
+
+    release_first.set()
+    active.join(5)
+    waiting.join(5)
+    worker.join(5)
+
+
+def test_stage1_scheduler_abort_removes_waiting_request():
+    sched, req_q, res_q = _make_stage1_scheduler()
+    release_first = threading.Event()
+    first_enqueued = threading.Event()
+    results: dict[str, DiffusionOutput] = {}
+
+    def _worker():
+        first = req_q.get(timeout=5)
+        assert first["args"][0].request_ids[0] == "active"
+        first_enqueued.set()
+        release_first.wait(timeout=5)
+        res_q.put(DiffusionOutput(output=torch.tensor([0]), request_id="active"))
+
+    worker = threading.Thread(target=_worker, daemon=True)
+    worker.start()
+
+    active = threading.Thread(
+        target=lambda: results.setdefault("active", sched.add_req(_mock_request("active"))),
+        daemon=True,
+    )
+    waiting = threading.Thread(
+        target=lambda: results.setdefault("waiting", sched.add_req(_mock_request("waiting"))),
+        daemon=True,
+    )
+
+    active.start()
+    first_enqueued.wait(timeout=5)
+    waiting.start()
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        if sched.estimate_waiting_queue_len() == 1:
+            break
+        time.sleep(0.01)
+
+    assert sched.abort_request("waiting") is True
+    release_first.set()
+
+    active.join(5)
+    waiting.join(5)
+    worker.join(5)
+
+    assert results["waiting"].error_code == "REQUEST_ABORTED"
+    assert results["waiting"].error == "Request aborted before dispatch"
+    assert sched.estimate_waiting_queue_len() == 0

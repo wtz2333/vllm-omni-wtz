@@ -45,6 +45,7 @@ class Stage1Scheduler(Scheduler):
         self._active_request: _QueuedRequest | None = None
         self._active_started_at: float | None = None
         self._enqueue_seq = 0
+        self._aborted_request_ids: set[str] = set()
         self._runtime_estimator = RuntimeProfileEstimator.from_path(
             getattr(od_config, "instance_runtime_profile_path", None),
             instance_type=getattr(od_config, "instance_runtime_profile_name", None),
@@ -66,6 +67,18 @@ class Stage1Scheduler(Scheduler):
             "output_rank": 0,
             "exec_all_ranks": True,
         }
+
+    @staticmethod
+    def _set_request_state(request: OmniDiffusionRequest, state: str) -> None:
+        setattr(request, "request_state", state)
+
+    @staticmethod
+    def _request_ids(request: OmniDiffusionRequest) -> list[str]:
+        return list(getattr(request, "request_ids", None) or [])
+
+    def _is_request_aborted(self, request: OmniDiffusionRequest) -> bool:
+        request_ids = self._request_ids(request)
+        return any(request_id in self._aborted_request_ids for request_id in request_ids)
 
     def _policy_name(self) -> str:
         return getattr(self.od_config, "instance_scheduler_policy", "fcfs")
@@ -283,28 +296,102 @@ class Stage1Scheduler(Scheduler):
             metrics={"scheduler_policy": self._policy_name(), "queue_len": len(self._waiting_queue)},
         )
 
-    def add_req(self, request: OmniDiffusionRequest) -> DiffusionOutput:
+    def enqueue_request(self, request: OmniDiffusionRequest) -> _QueuedRequest:
         enqueue_time = time.monotonic()
+        setattr(request, "arrival_time", getattr(request, "arrival_time", enqueue_time) or enqueue_time)
+        self._set_request_state(request, "waiting")
+        for request_id in self._request_ids(request):
+            self._aborted_request_ids.discard(request_id)
+        self._enqueue_seq += 1
+        queued_request = _QueuedRequest(
+            request=request,
+            enqueue_time=enqueue_time,
+            sequence_id=self._enqueue_seq,
+            schedule_metrics={"scheduler_policy": self._policy_name()},
+        )
+        self._waiting_queue.append(queued_request)
+        self._maybe_reorder_waiting_queue(queued_request, enqueue_time)
+        logger.info("QUEUE_ENQUEUE request_id=%s queue_len=%d", self._request_label(request), len(self._waiting_queue))
+        self._queue_cv.notify_all()
+        return queued_request
+
+    def pop_next_request(self) -> OmniDiffusionRequest | None:
+        with self._queue_cv:
+            if self._active_request is not None or not self._waiting_queue:
+                return None
+            queued_request = self._waiting_queue.popleft()
+            self._active_request = queued_request
+            self._active_started_at = time.monotonic()
+            self._set_request_state(queued_request.request, "running")
+            logger.info(
+                "QUEUE_DEQUEUE request_id=%s queue_len=%d",
+                self._request_label(queued_request.request),
+                len(self._waiting_queue),
+            )
+            return queued_request.request
+
+    def estimate_waiting_queue_len(self) -> int:
+        with self._queue_cv:
+            return len(self._waiting_queue)
+
+    def estimate_scheduler_load(self) -> dict[str, int]:
+        with self._queue_cv:
+            return {
+                "waiting_queue_len": len(self._waiting_queue),
+                "active_request_count": int(self._active_request is not None),
+                "paused_context_count": 0,
+            }
+
+    def finish_request(self, request: OmniDiffusionRequest) -> None:
+        for request_id in self._request_ids(request):
+            self._aborted_request_ids.discard(request_id)
+        self._set_request_state(request, "finished")
+
+    def fail_request(self, request: OmniDiffusionRequest) -> None:
+        for request_id in self._request_ids(request):
+            self._aborted_request_ids.discard(request_id)
+        self._set_request_state(request, "failed")
+
+    def abort_request(self, request_id: str) -> bool:
+        with self._queue_cv:
+            for queued_request in list(self._waiting_queue):
+                if request_id in self._request_ids(queued_request.request):
+                    self._waiting_queue.remove(queued_request)
+                    self._aborted_request_ids.add(request_id)
+                    self._set_request_state(queued_request.request, "aborted")
+                    logger.info("REQUEST_ABORT request_id=%s queue_len=%d", request_id, len(self._waiting_queue))
+                    self._queue_cv.notify_all()
+                    return True
+
+            if self._active_request is not None and request_id in self._request_ids(self._active_request.request):
+                self._aborted_request_ids.add(request_id)
+                self._set_request_state(self._active_request.request, "aborted")
+                logger.info("REQUEST_ABORT request_id=%s state=running", request_id)
+                return True
+
+            return False
+
+    def add_req(self, request: OmniDiffusionRequest) -> DiffusionOutput:
         request_label = self._request_label(request)
 
         with self._queue_cv:
-            self._enqueue_seq += 1
-            queued_request = _QueuedRequest(
-                request=request,
-                enqueue_time=enqueue_time,
-                sequence_id=self._enqueue_seq,
-                schedule_metrics={"scheduler_policy": self._policy_name()},
-            )
-            self._waiting_queue.append(queued_request)
-            self._maybe_reorder_waiting_queue(queued_request, enqueue_time)
-            logger.info("QUEUE_ENQUEUE request_id=%s queue_len=%d", request_label, len(self._waiting_queue))
-            while self._waiting_queue[0] is not queued_request or self._active_request is not None:
+            queued_request = self.enqueue_request(request)
+            while True:
+                if self._is_request_aborted(request):
+                    return self._normalize_error_output(
+                        request=request,
+                        error="Request aborted before dispatch",
+                        error_code="REQUEST_ABORTED",
+                    )
+                if self._active_request is None and self._waiting_queue and self._waiting_queue[0] is queued_request:
+                    self._waiting_queue.popleft()
+                    self._active_request = queued_request
+                    self._active_started_at = time.monotonic()
+                    self._set_request_state(request, "running")
+                    queue_wait_ms = (time.monotonic() - queued_request.enqueue_time) * 1000
+                    logger.info("QUEUE_DEQUEUE request_id=%s queue_len=%d", request_label, len(self._waiting_queue))
+                    break
                 self._queue_cv.wait()
-            self._waiting_queue.popleft()
-            self._active_request = queued_request
-            self._active_started_at = time.monotonic()
-            queue_wait_ms = (time.monotonic() - queued_request.enqueue_time) * 1000
-            logger.info("QUEUE_DEQUEUE request_id=%s queue_len=%d", request_label, len(self._waiting_queue))
 
         execute_start = time.monotonic()
         try:
@@ -327,6 +414,7 @@ class Stage1Scheduler(Scheduler):
                     else:
                         output = raw_output
         except zmq.error.Again as exc:
+            self.fail_request(request)
             logger.error("REQUEST_FAIL request_id=%s error_code=SCHEDULER_TIMEOUT", request_label)
             raise TimeoutError("Scheduler did not respond in time.") from exc
         finally:
@@ -339,6 +427,7 @@ class Stage1Scheduler(Scheduler):
         output = self._annotate_output(output, queued_request, request, queue_wait_ms, execute_latency_ms)
 
         if output.error:
+            self.fail_request(request)
             if output.error_code is None:
                 output.error_code = "REQUEST_EXEC_FAILED"
             logger.error(
@@ -351,6 +440,7 @@ class Stage1Scheduler(Scheduler):
             )
             return output
 
+        self.finish_request(request)
         logger.info(
             "REQUEST_DONE request_id=%s queue_len=%d latency_ms=%.2f",
             output.request_id,

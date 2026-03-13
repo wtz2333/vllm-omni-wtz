@@ -63,3 +63,36 @@ def test_step_raises_error_with_error_code_and_request_id():
 
     with pytest.raises(RuntimeError, match=r"\[WORKER_EXEC_FAILED\] request_id=req-1 boom"):
         engine.step(_make_request())
+
+
+def test_engine_estimate_scheduler_facade():
+    engine = object.__new__(DiffusionEngine)
+    engine.executor = SimpleNamespace(
+        scheduler=SimpleNamespace(
+            estimate_waiting_queue_len=lambda: 3,
+            estimate_scheduler_load=lambda: {
+                "waiting_queue_len": 3,
+                "active_request_count": 1,
+                "paused_context_count": 0,
+            },
+        )
+    )
+
+    assert engine.estimate_waiting_queue_len() == 3
+    assert engine.estimate_scheduler_load() == {
+        "waiting_queue_len": 3,
+        "active_request_count": 1,
+        "paused_context_count": 0,
+    }
+
+
+def test_engine_abort_delegates_to_scheduler():
+    aborted: list[str] = []
+    engine = object.__new__(DiffusionEngine)
+    engine.executor = SimpleNamespace(
+        scheduler=SimpleNamespace(abort_request=lambda request_id: aborted.append(request_id) or True)
+    )
+
+    engine.abort(["req-1", "req-2"])
+
+    assert aborted == ["req-1", "req-2"]

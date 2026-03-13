@@ -421,6 +421,7 @@ class OmniDiffusionConfig:
     instance_scheduler_aging_factor: float = 0.0
     instance_runtime_profile_path: str | None = None
     instance_runtime_profile_name: str | None = None
+    diffusion_engine_max_concurrency: int = 4
 
     # Stage verification
     enable_stage_verification: bool = True
@@ -596,6 +597,8 @@ class OmniDiffusionConfig:
             raise ValueError("instance_scheduler_slo_floor_ms must be >= 0")
         if self.instance_scheduler_aging_factor < 0:
             raise ValueError("instance_scheduler_aging_factor must be >= 0")
+        if self.diffusion_engine_max_concurrency < 1:
+            raise ValueError("diffusion_engine_max_concurrency must be >= 1")
 
     def update_multimodal_support(self) -> None:
         self.supports_multimodal_inputs = self.model_class_name in {"QwenImageEditPlusPipeline"}
