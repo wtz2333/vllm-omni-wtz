@@ -421,7 +421,7 @@ class OmniDiffusionConfig:
     instance_scheduler_aging_factor: float = 0.0
     instance_runtime_profile_path: str | None = None
     instance_runtime_profile_name: str | None = None
-    diffusion_engine_max_concurrency: int = 4
+    diffusion_engine_max_concurrency: int = 32
 
     # Stage verification
     enable_stage_verification: bool = True
