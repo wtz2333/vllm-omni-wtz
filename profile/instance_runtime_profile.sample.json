@@ -3,11 +3,92 @@
     {
       "instance_type": "qwen-image-tp1",
       "task_type": "image",
+      "width": 128,
+      "height": 128,
+      "num_frames": 1,
+      "steps": 5,
+      "latency_ms": 4267
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 128,
+      "height": 128,
+      "num_frames": 1,
+      "steps": 10,
+      "latency_ms": 8827
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 128,
+      "height": 128,
+      "num_frames": 1,
+      "steps": 50,
+      "latency_ms": 41913
+    },
+        {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 256,
+      "height": 256,
+      "num_frames": 1,
+      "steps": 5,
+      "latency_ms": 4362
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 256,
+      "height": 256,
+      "num_frames": 1,
+      "steps": 10,
+      "latency_ms": 8709
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 256,
+      "height": 256,
+      "num_frames": 1,
+      "steps": 50,
+      "latency_ms": 42984
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 512,
+      "height": 512,
+      "num_frames": 1,
+      "steps": 5,
+      "latency_ms": 4813
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 512,
+      "height": 512,
+      "num_frames": 1,
+      "steps": 10,
+      "latency_ms": 9088
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 512,
+      "height": 512,
+      "num_frames": 1,
+      "steps": 50,
+      "latency_ms": 41069
+    },
+     {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
       "width": 1024,
       "height": 1024,
       "num_frames": 1,
-      "steps": 10,
-      "latency_ms": 420
+      "steps": 5,
+      "latency_ms": 6767
     },
     {
       "instance_type": "qwen-image-tp1",
@@ -15,8 +96,8 @@
       "width": 1024,
       "height": 1024,
       "num_frames": 1,
-      "steps": 30,
-      "latency_ms": 1180
+      "steps": 10,
+      "latency_ms": 11797
     },
     {
       "instance_type": "qwen-image-tp1",
@@ -25,7 +106,61 @@
       "height": 1024,
       "num_frames": 1,
       "steps": 50,
-      "latency_ms": 1910
+      "latency_ms": 52263
+    },
+     {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 1536,
+      "height": 1536,
+      "num_frames": 1,
+      "steps": 5,
+      "latency_ms": 15973
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 1536,
+      "height": 1536,
+      "num_frames": 1,
+      "steps": 10,
+      "latency_ms": 28965
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 1536,
+      "height": 1536,
+      "num_frames": 1,
+      "steps": 50,
+      "latency_ms": 132217
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 768,
+      "height": 768,
+      "num_frames": 1,
+      "steps": 5,
+      "latency_ms": 5058
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 768,
+      "height": 768,
+      "num_frames": 1,
+      "steps": 10,
+      "latency_ms": 9276
+    },
+    {
+      "instance_type": "qwen-image-tp1",
+      "task_type": "image",
+      "width": 768,
+      "height": 768,
+      "num_frames": 1,
+      "steps": 50,
+      "latency_ms": 41996
     },
     {
       "instance_type": "wan-video-tp2",
