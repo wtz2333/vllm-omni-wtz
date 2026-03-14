@@ -15,19 +15,25 @@ MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
 REQUEST_RATE="${REQUEST_RATE:-inf}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-5}"
 DATASET_PATH="${DATASET_PATH:-${ROOT_DIR}/benchmarks/dataset/sd3_trace_redistributed.txt}"
-LOG_LEVEL="${LOG_LEVEL:-info}"
+STREAM_SERVER_LOGS="${STREAM_SERVER_LOGS:-1}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 OUT_DIR="${OUT_DIR:-/tmp/trace_scheduler_bench_${RUN_TAG}}"
 
 SERVER_LOG="${OUT_DIR}/server_${POLICY}.log"
+BENCH_LOG="${OUT_DIR}/benchmark_${POLICY}.log"
 RESULT_JSON="${OUT_DIR}/result_${POLICY}.json"
 
 mkdir -p "${OUT_DIR}"
 
 cleanup() {
+  if [[ -n "${TAIL_PID:-}" ]]; then
+    kill "${TAIL_PID}" 2>/dev/null || true
+    wait "${TAIL_PID}" 2>/dev/null || true
+  fi
   if [[ -n "${SERVER_PID:-}" ]]; then
     if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      kill -- "-${SERVER_PID}" 2>/dev/null || true
+      pkill -TERM -P "${SERVER_PID}" 2>/dev/null || true
+      kill "${SERVER_PID}" 2>/dev/null || true
       wait "${SERVER_PID}" 2>/dev/null || true
     fi
   fi
@@ -44,41 +50,49 @@ echo "  out_dir: ${OUT_DIR}"
 
 cd "${ROOT_DIR}"
 
-setsid vllm serve \
-  --model "${MODEL}" \
+nohup vllm serve \
+  "${MODEL}" \
   --omni \
   --host "${HOST}" \
   --port "${PORT}" \
   --num-gpus "${NUM_GPUS}" \
   --instance-scheduler-policy "${POLICY}" \
-  --log-level "${LOG_LEVEL}" \
-  >"${SERVER_LOG}" 2>&1 &
+  >"${SERVER_LOG}" 2>&1 </dev/null &
 SERVER_PID=$!
 
-READY_URL="http://${HOST}:${PORT}/v1/models"
+READY_URL="http://${HOST}:${PORT}/health"
 READY_TIMEOUT_SEC=600
 READY_INTERVAL_SEC=2
 READY_START_TS="$(date +%s)"
 
 echo "Waiting for server readiness: ${READY_URL}"
 while true; do
-  if curl -fsS "${READY_URL}" >/dev/null 2>&1; then
+  HTTP_CODE="$(curl -sS -o /dev/null -w '%{http_code}' "${READY_URL}" || true)"
+  if [[ "${HTTP_CODE}" == "200" ]]; then
     break
   fi
   NOW_TS="$(date +%s)"
   if (( NOW_TS - READY_START_TS >= READY_TIMEOUT_SEC )); then
     echo "Server did not become ready within ${READY_TIMEOUT_SEC}s"
+    echo "Last ready probe http_code: ${HTTP_CODE}"
     echo "Last server log lines:"
     tail -n 100 "${SERVER_LOG}" || true
     exit 1
   fi
+  echo "  waiting... http_code=${HTTP_CODE}"
   sleep "${READY_INTERVAL_SEC}"
 done
 
 echo "Server ready, running benchmark"
+if [[ "${STREAM_SERVER_LOGS}" == "1" ]]; then
+  tail -n 0 -F "${SERVER_LOG}" 2>/dev/null | sed 's/^/[server] /' &
+  TAIL_PID=$!
+fi
 
 cd "${BENCH_DIR}"
-python diffusion_benchmark_serving.py \
+echo "Benchmark command:"
+echo "  python -u diffusion_benchmark_serving.py --backend openai --base-url http://${HOST}:${PORT} --model ${MODEL} --dataset trace --task t2i --dataset-path ${DATASET_PATH} --num-prompts ${NUM_PROMPTS} --warmup-requests ${WARMUP_REQUESTS} --request-rate ${REQUEST_RATE} --max-concurrency ${MAX_CONCURRENCY} --output-file ${RESULT_JSON}"
+python -u diffusion_benchmark_serving.py \
   --backend openai \
   --base-url "http://${HOST}:${PORT}" \
   --model "${MODEL}" \
@@ -89,7 +103,8 @@ python diffusion_benchmark_serving.py \
   --warmup-requests "${WARMUP_REQUESTS}" \
   --request-rate "${REQUEST_RATE}" \
   --max-concurrency "${MAX_CONCURRENCY}" \
-  --output-file "${RESULT_JSON}"
+  --output-file "${RESULT_JSON}" \
+  2>&1 | tee "${BENCH_LOG}"
 
 echo
 echo "Benchmark finished"
