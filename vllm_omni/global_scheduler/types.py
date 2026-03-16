@@ -51,6 +51,7 @@ class RuntimeStats:
     queue_len: int = 0
     inflight: int = 0
     ewma_service_time_s: float = 1.0
+    waiting_requests: tuple[RequestMeta, ...] = field(default_factory=tuple)
 
 
 @dataclass(slots=True)

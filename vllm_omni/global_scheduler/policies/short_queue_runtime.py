@@ -24,16 +24,17 @@ class ShortQueueRuntimePolicy(PolicyBase):
 
     def _estimate_queue_runtime_s(
         self,
-        request: RequestMeta,
         instance: InstanceSpec,
         stats: RuntimeStats,
     ) -> float:
-        est_service_time_s = self._estimator.estimate_runtime_s(
-            request=request,
-            ewma_fallback_s=stats.ewma_service_time_s,
-            instance_type=instance.instance_type,
+        return sum(
+            self._estimator.estimate_runtime_s(
+                request=waiting_request,
+                ewma_fallback_s=stats.ewma_service_time_s,
+                instance_type=instance.instance_type,
+            )
+            for waiting_request in stats.waiting_requests
         )
-        return float(stats.queue_len) * est_service_time_s
 
     def select_instance(
         self,
@@ -59,7 +60,7 @@ class ShortQueueRuntimePolicy(PolicyBase):
             candidates = list(instances)
 
         scored = [
-            (instance, self._estimate_queue_runtime_s(request, instance, runtime_stats[instance.id]))
+            (instance, self._estimate_queue_runtime_s(instance, runtime_stats[instance.id]))
             for instance in candidates
         ]
         min_score = min(score for _, score in scored)

@@ -828,7 +828,7 @@ def create_app(
                 ),
             )
 
-        app.state.runtime_state_store.on_request_start(decision.instance_id)
+        app.state.runtime_state_store.on_request_start(decision.instance_id, request=request_meta)
         started_at = time.monotonic()
         current_config = getattr(app.state, "global_scheduler_config", config)
         filtered_headers = _filter_forward_headers(request.headers)
@@ -1110,7 +1110,7 @@ def create_app(
                 ),
             )
 
-        app.state.runtime_state_store.on_request_start(decision.instance_id)
+        app.state.runtime_state_store.on_request_start(decision.instance_id, request=request_meta)
         started_at = time.monotonic()
         current_config = getattr(app.state, "global_scheduler_config", config)
         filtered_headers = _filter_forward_headers(request.headers)
@@ -1226,7 +1226,7 @@ def create_app(
                 ),
             )
 
-        app.state.runtime_state_store.on_request_start(decision.instance_id)
+        app.state.runtime_state_store.on_request_start(decision.instance_id, request=request_meta)
         started_at = time.monotonic()
         current_config = getattr(app.state, "global_scheduler_config", config)
         filtered_headers = _filter_forward_headers(request.headers)

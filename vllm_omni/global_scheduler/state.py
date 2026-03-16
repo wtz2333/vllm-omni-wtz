@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from threading import RLock
 
-from .types import InstanceSpec, RuntimeStats
+from .types import InstanceSpec, RequestMeta, RuntimeStats
 
 
 class RuntimeStateStore:
@@ -38,13 +38,13 @@ class RuntimeStateStore:
         self._lock = RLock()
         self._default_ewma_service_time_s = default_ewma_service_time_s
         self._draining_instance_ids: set[str] = set()
-        self._default_ewma_service_time_s = default_ewma_service_time_s
-        self._draining_instance_ids: set[str] = set()
+        self._instance_specs: dict[str, InstanceSpec] = {instance.id: instance for instance in instances}
         self._stats: dict[str, RuntimeStats] = {
             instance.id: RuntimeStats(
                 queue_len=0,
                 inflight=0,
                 ewma_service_time_s=default_ewma_service_time_s,
+                waiting_requests=(),
             )
             for instance in instances
         }
@@ -84,34 +84,36 @@ class RuntimeStateStore:
                     self._draining_instance_ids.add(instance_id)
 
             for instance in instances:
+                self._instance_specs[instance.id] = instance
                 if instance.id not in self._stats:
                     self._stats[instance.id] = RuntimeStats(
                         queue_len=0,
                         inflight=0,
                         ewma_service_time_s=self._default_ewma_service_time_s,
+                        waiting_requests=(),
                     )
 
-    def on_request_start(self, instance_id: str) -> RuntimeStats:
+            for instance_id in list(self._instance_specs):
+                if instance_id not in desired_ids and instance_id not in self._stats:
+                    del self._instance_specs[instance_id]
+
+    def on_request_start(self, instance_id: str, request: RequestMeta) -> RuntimeStats:
         """Apply start-of-request counters for one instance.
 
         Args:
             instance_id: Target routed instance id.
-
-        Returns:
-            Snapshot of updated runtime stats.
-        """
-        """Apply start-of-request counters for one instance.
-
-        Args:
-            instance_id: Target routed instance id.
+            request: Request metadata recorded for FIFO waiting-queue estimation.
 
         Returns:
             Snapshot of updated runtime stats.
         """
         with self._lock:
             stats = self._get_stats(instance_id)
-            stats.queue_len += 1
-            stats.inflight += 1
+            if stats.inflight < self._max_concurrency(instance_id):
+                stats.inflight += 1
+            else:
+                stats.queue_len += 1
+                stats.waiting_requests = stats.waiting_requests + (request,)
             return replace(stats)
 
     def on_request_finish(self, instance_id: str, latency_s: float, ok: bool) -> RuntimeStats:
@@ -125,21 +127,19 @@ class RuntimeStateStore:
         Returns:
             Snapshot of updated runtime stats.
         """
-        """Apply finish-of-request counters and EWMA update.
-
-        Args:
-            instance_id: Target routed instance id.
-            latency_s: Observed end-to-end upstream latency in seconds.
-            ok: Whether upstream handling succeeded.
-
-        Returns:
-            Snapshot of updated runtime stats.
-        """
         del ok
         with self._lock:
             stats = self._get_stats(instance_id)
-            stats.queue_len = max(stats.queue_len - 1, 0)
-            stats.inflight = max(stats.inflight - 1, 0)
+            if stats.inflight > 0:
+                stats.inflight -= 1
+            elif stats.queue_len > 0:
+                stats.queue_len -= 1
+                stats.waiting_requests = stats.waiting_requests[1:]
+
+            if stats.queue_len > 0:
+                stats.queue_len -= 1
+                stats.waiting_requests = stats.waiting_requests[1:]
+                stats.inflight += 1
 
             if latency_s >= 0.0:
                 stats.ewma_service_time_s = (
@@ -149,15 +149,38 @@ class RuntimeStateStore:
             if instance_id in self._draining_instance_ids and stats.queue_len == 0 and stats.inflight == 0:
                 self._draining_instance_ids.remove(instance_id)
                 del self._stats[instance_id]
-                return RuntimeStats(queue_len=0, inflight=0, ewma_service_time_s=stats.ewma_service_time_s)
-
-            if instance_id in self._draining_instance_ids and stats.queue_len == 0 and stats.inflight == 0:
-                self._draining_instance_ids.remove(instance_id)
-                del self._stats[instance_id]
+                self._instance_specs.pop(instance_id, None)
                 return RuntimeStats(queue_len=0, inflight=0, ewma_service_time_s=stats.ewma_service_time_s)
 
             return replace(stats)
+
     def _get_stats(self, instance_id: str) -> RuntimeStats:
         if instance_id not in self._stats:
             raise KeyError(f"Unknown instance id: {instance_id}")
         return self._stats[instance_id]
+
+    def _max_concurrency(self, instance_id: str) -> int:
+        instance = self._instance_specs.get(instance_id)
+        if instance is None:
+            return 1
+        return self._max_concurrency_from_args(instance.launch_args)
+
+    @staticmethod
+    def _max_concurrency_from_args(args: list[str]) -> int:
+        keys = {"--max-concurrency"}
+        for idx, item in enumerate(args):
+            if "=" in item:
+                key, value = item.split("=", 1)
+                if key in keys:
+                    try:
+                        parsed = int(value)
+                    except ValueError:
+                        return 1
+                    return max(parsed, 1)
+            if item in keys and idx + 1 < len(args):
+                try:
+                    parsed = int(args[idx + 1])
+                except ValueError:
+                    return 1
+                return max(parsed, 1)
+        return 1
