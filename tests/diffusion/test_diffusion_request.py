@@ -22,3 +22,9 @@ def test_diffusion_request_sets_stage1_defaults():
 
     assert request.arrival_time > 0
     assert request.request_state == "waiting"
+    assert request.executed_steps == 0
+    assert request.max_steps_this_turn is None
+    assert request.dispatch_epoch == 0
+    assert request.estimated_cost_s is None
+    assert request.deadline_ts is None
+    assert request.primary_request_id == "req-1"

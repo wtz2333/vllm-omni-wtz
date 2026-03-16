@@ -28,6 +28,8 @@ def test_default_stage_config_includes_cache_backend():
         instance_scheduler_aging_factor=0.25,
         instance_runtime_profile_path="/profile/runtime.json",
         instance_runtime_profile_name="img-a",
+        diffusion_enable_step_chunk=True,
+        diffusion_enable_chunk_preemption=True,
     )
 
     engine_args = stage_cfg["engine_args"]
@@ -41,9 +43,18 @@ def test_default_stage_config_includes_cache_backend():
     assert engine_args["instance_scheduler_aging_factor"] == 0.25
     assert engine_args["instance_runtime_profile_path"] == "/profile/runtime.json"
     assert engine_args["instance_runtime_profile_name"] == "img-a"
+    assert engine_args["diffusion_enable_step_chunk"] is True
+    assert engine_args["diffusion_enable_chunk_preemption"] is True
     parallel_config = engine_args["parallel_config"]
     ulysses_degree = getattr(parallel_config, "ulysses_degree", None)
     assert ulysses_degree == 2
+
+
+def test_chunk_preemption_requires_step_chunk():
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+    with pytest.raises(ValueError, match="diffusion_enable_chunk_preemption requires diffusion_enable_step_chunk=True"):
+        OmniDiffusionConfig(diffusion_enable_step_chunk=False, diffusion_enable_chunk_preemption=True)
 
 
 def test_default_cache_config_used_when_missing():
