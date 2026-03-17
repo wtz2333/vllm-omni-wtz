@@ -139,6 +139,23 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
+def set_single_step_warmup_timestep(
+    scheduler,
+    *,
+    device: str | torch.device | None = None,
+    sigma: float = 1.0,
+) -> tuple[torch.Tensor, int]:
+    """Install a 1-step warmup schedule without invoking sigma stretching."""
+    sigma_tensor = torch.tensor([float(sigma)], dtype=torch.float32, device=device)
+    timesteps = sigma_tensor * float(scheduler.config.num_train_timesteps)
+    scheduler.num_inference_steps = 1
+    scheduler.timesteps = timesteps
+    scheduler.sigmas = torch.cat([sigma_tensor, torch.zeros(1, dtype=torch.float32, device=device)])
+    scheduler._step_index = None
+    scheduler._begin_index = None
+    return timesteps, 1
+
+
 def get_timestep_embedding(
     timesteps: torch.Tensor,
     embedding_dim: int,
@@ -500,6 +517,10 @@ class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin):
         return latents
 
     def prepare_timesteps(self, num_inference_steps, sigmas, image_seq_len):
+        if num_inference_steps == 1:
+            sigma = float(sigmas[0]) if sigmas is not None else 1.0
+            return set_single_step_warmup_timestep(self.scheduler, sigma=sigma)
+
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas
         # image_seq_len = latents.shape[1]
         mu = calculate_shift(

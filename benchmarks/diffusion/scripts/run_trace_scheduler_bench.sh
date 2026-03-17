@@ -30,18 +30,74 @@ RESULT_JSON="${OUT_DIR}/result_${POLICY}.json"
 
 mkdir -p "${OUT_DIR}"
 
+find_port_pids() {
+  local port="$1"
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -tiTCP:"${port}" -sTCP:LISTEN 2>/dev/null || true
+  elif command -v fuser >/dev/null 2>&1; then
+    fuser -n tcp "${port}" 2>/dev/null | tr ' ' '\n' | sed '/^$/d' || true
+  fi
+}
+
+wait_for_port_state() {
+  local port="$1"
+  local should_exist="$2"
+  local timeout_sec="${3:-30}"
+  local start_ts now_ts has_pid
+
+  start_ts="$(date +%s)"
+  while true; do
+    has_pid=0
+    if [[ -n "$(find_port_pids "${port}")" ]]; then
+      has_pid=1
+    fi
+
+    if [[ "${should_exist}" == "1" && "${has_pid}" == "1" ]]; then
+      return 0
+    fi
+    if [[ "${should_exist}" == "0" && "${has_pid}" == "0" ]]; then
+      return 0
+    fi
+
+    now_ts="$(date +%s)"
+    if (( now_ts - start_ts >= timeout_sec )); then
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+kill_server_processes() {
+  local pid
+
+  if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
+    kill -TERM -- "-${SERVER_PID}" 2>/dev/null || true
+    sleep 2
+    kill -KILL -- "-${SERVER_PID}" 2>/dev/null || true
+    wait "${SERVER_PID}" 2>/dev/null || true
+  fi
+
+  while read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    kill -TERM "${pid}" 2>/dev/null || true
+  done < <(find_port_pids "${PORT}")
+
+  sleep 2
+
+  while read -r pid; do
+    [[ -z "${pid}" ]] && continue
+    kill -KILL "${pid}" 2>/dev/null || true
+  done < <(find_port_pids "${PORT}")
+
+  wait_for_port_state "${PORT}" 0 30 || true
+}
+
 cleanup() {
   if [[ -n "${TAIL_PID:-}" ]]; then
     kill "${TAIL_PID}" 2>/dev/null || true
     wait "${TAIL_PID}" 2>/dev/null || true
   fi
-  if [[ -n "${SERVER_PID:-}" ]]; then
-    if kill -0 "${SERVER_PID}" 2>/dev/null; then
-      pkill -TERM -P "${SERVER_PID}" 2>/dev/null || true
-      kill "${SERVER_PID}" 2>/dev/null || true
-      wait "${SERVER_PID}" 2>/dev/null || true
-    fi
-  fi
+  kill_server_processes
 }
 
 trap cleanup EXIT
@@ -57,7 +113,12 @@ echo "  out_dir: ${OUT_DIR}"
 
 cd "${ROOT_DIR}"
 
-nohup vllm serve \
+if wait_for_port_state "${PORT}" 1 1; then
+  echo "Port ${PORT} is already in use; cleaning up stale service before restart"
+  kill_server_processes
+fi
+
+setsid nohup vllm serve \
   "${MODEL}" \
   --omni \
   --host "${HOST}" \

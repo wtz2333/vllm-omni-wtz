@@ -2,9 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+import warnings
 
 import pytest
 import torch
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
+    FlowMatchEulerDiscreteScheduler,
+)
 
 from vllm_omni.diffusion.context import DiffusionRequestContext
 from vllm_omni.diffusion.models.qwen_image.cfg_parallel import QwenImageCFGParallelMixin
@@ -103,3 +107,22 @@ def test_qwen_step_chunk_restores_scheduler_state_across_interleaved_requests():
     assert finished is True
     assert ctx_a.current_step == 7
     assert pipeline.scheduler.sigmas.numel() == 8
+
+
+def test_qwen_prepare_timesteps_skips_flowmatch_stretch_for_single_step_warmup():
+    pipeline = QwenImagePipeline.__new__(QwenImagePipeline)
+    pipeline.scheduler = FlowMatchEulerDiscreteScheduler(shift_terminal=0.1)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("error", RuntimeWarning)
+        timesteps, num_inference_steps = QwenImagePipeline.prepare_timesteps(
+            pipeline,
+            num_inference_steps=1,
+            sigmas=None,
+            image_seq_len=256,
+        )
+
+    assert caught == []
+    assert num_inference_steps == 1
+    assert torch.equal(timesteps, torch.tensor([1000.0], dtype=torch.float32))
+    assert torch.equal(pipeline.scheduler.sigmas, torch.tensor([1.0, 0.0], dtype=torch.float32))
