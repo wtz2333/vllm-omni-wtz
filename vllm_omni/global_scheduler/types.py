@@ -35,6 +35,7 @@ class InstanceSpec:
     id: str
     endpoint: str
     instance_type: str | None = None
+    numa_node: int | None = None
     launch_executable: str | None = None
     launch_model: str | None = None
     launch_args: list[str] = field(default_factory=list)

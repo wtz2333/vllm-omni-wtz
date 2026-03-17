@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -78,7 +79,21 @@ class LocalProcessController(ProcessController):
             raise LifecycleUnsupportedError(f"launch executable is empty for instance {instance.id}")
         env = os.environ.copy()
         env.update(instance.launch_env)
+        if instance.numa_node is not None:
+            env.setdefault("VLLM_OMNI_NUMA_NODE", str(instance.numa_node))
+        argv = LocalProcessController._maybe_prefix_numactl(argv, env)
         return argv, env
+
+    @staticmethod
+    def _maybe_prefix_numactl(argv: list[str], env: dict[str, str]) -> list[str]:
+        """Bind one instance to an explicitly configured NUMA node."""
+        if shutil.which("numactl") is None:
+            return argv
+
+        explicit_node = env.get("VLLM_OMNI_NUMA_NODE", "").strip()
+        if explicit_node:
+            return ["numactl", f"--cpunodebind={explicit_node}", f"--membind={explicit_node}", *argv]
+        return argv
 
     @staticmethod
     def _strip_scheduler_only_args(args: list[str]) -> list[str]:

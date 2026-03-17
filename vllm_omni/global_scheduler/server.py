@@ -412,6 +412,7 @@ def _to_instance_specs(config: GlobalSchedulerConfig) -> list[InstanceSpec]:
             id=instance.id,
             endpoint=instance.endpoint,
             instance_type=instance.instance_type,
+            numa_node=instance.numa_node,
             launch_executable=instance.launch.executable if instance.launch is not None else None,
             launch_model=instance.launch.model if instance.launch is not None else None,
             launch_args=list(instance.launch.args) if instance.launch is not None else [],

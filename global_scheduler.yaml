@@ -32,6 +32,7 @@ instances:
   - id: worker0
     endpoint: http://127.0.0.1:8001
     instance_type: wan
+    numa_node: 0
     launch:
       executable: vllm
       model: /data2/group_谈海生/mumura/models/Wan2.2-T2V-A14B-Diffusers

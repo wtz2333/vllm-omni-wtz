@@ -210,6 +210,7 @@ class InstanceConfig(BaseModel):
     id: str
     endpoint: str
     instance_type: str | None = None
+    numa_node: int | None = None
     backends: list[str] = Field(default_factory=list)
     launch: LaunchConfig | None = None
     stop: StopConfig | None = None
@@ -240,6 +241,15 @@ class InstanceConfig(BaseModel):
             return value
         if not value.strip():
             raise ValueError("instances[].instance_type cannot be empty")
+        return value
+
+    @field_validator("numa_node")
+    @classmethod
+    def validate_numa_node(cls, value: int | None) -> int | None:
+        if value is None:
+            return value
+        if value < 0:
+            raise ValueError("instances[].numa_node must be >= 0")
         return value
 
     @field_validator("backends")
