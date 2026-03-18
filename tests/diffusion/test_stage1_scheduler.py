@@ -204,7 +204,7 @@ def test_stage1_scheduler_marks_finished_request_as_fully_executed_without_worke
     assert output.metrics["remaining_steps"] == 0
 
 
-def test_stage1_scheduler_slo_first_reorders_waiting_queue():
+def test_stage1_scheduler_slo_first_reorders_waiting_queue_by_slack_over_remaining_cost():
     sched, req_q, res_q = _make_stage1_scheduler(policy="slo_first", slo_target_ms=5000.0)
     enqueue_order: list[str] = []
     release_first = threading.Event()
@@ -237,37 +237,49 @@ def test_stage1_scheduler_slo_first_reorders_waiting_queue():
         ),
         daemon=True,
     )
-    delayed = threading.Thread(
+    tighter = threading.Thread(
         target=lambda: results.setdefault(
-            "delayed",
-            sched.add_req(_mock_request("delayed", num_inference_steps=18, extra_args={"slo_ms": 20000.0})),
+            "tighter",
+            sched.add_req(
+                _mock_request(
+                    "tighter",
+                    num_inference_steps=2,
+                    extra_args={"slo_ms": 3000.0, "estimated_cost_s": 2.0},
+                )
+            ),
         ),
         daemon=True,
     )
-    urgent = threading.Thread(
+    looser = threading.Thread(
         target=lambda: results.setdefault(
-            "urgent",
-            sched.add_req(_mock_request("urgent", num_inference_steps=1, extra_args={"slo_ms": 2000.0})),
+            "looser",
+            sched.add_req(
+                _mock_request(
+                    "looser",
+                    num_inference_steps=1,
+                    extra_args={"slo_ms": 2500.0, "estimated_cost_s": 1.0},
+                )
+            ),
         ),
         daemon=True,
     )
 
     active.start()
     first_enqueued.wait(timeout=5)
-    delayed.start()
-    urgent.start()
+    tighter.start()
+    looser.start()
     second_waiting.set()
     release_first.set()
 
     active.join(5)
-    delayed.join(5)
-    urgent.join(5)
+    tighter.join(5)
+    looser.join(5)
     worker.join(5)
 
-    assert enqueue_order == ["active", "urgent", "delayed"]
-    assert results["urgent"].metrics["scheduler_policy"] == "slo_first"
-    assert results["urgent"].metrics["self_hit"] == 1
-    assert results["urgent"].metrics["queue_reorder_count"] == 1
+    assert enqueue_order == ["active", "looser", "tighter"]
+    assert results["looser"].metrics["scheduler_policy"] == "slo_first"
+    assert results["looser"].metrics["self_hit"] == 1
+    assert results["looser"].metrics["queue_reorder_count"] == 1
 
 
 def test_stage1_scheduler_slo_first_splits_on_time_and_best_effort_sets():
@@ -293,6 +305,32 @@ def test_stage1_scheduler_slo_first_splits_on_time_and_best_effort_sets():
     assert last.schedule_metrics["on_time_set_size"] == 2
     assert last.schedule_metrics["best_effort_set_size"] == 2
     assert last.schedule_metrics["dispatch_group"] == "on_time"
+
+
+def test_stage1_scheduler_slo_first_orders_on_time_set_by_slack_over_remaining_cost():
+    sched, _req_q, _res_q = _make_stage1_scheduler(policy="slo_first", slo_target_ms=5000.0)
+    tighter = _mock_request(
+        "tighter",
+        num_inference_steps=2,
+        extra_args={"slo_ms": 3000.0, "estimated_cost_s": 2.0},
+    )
+    looser = _mock_request(
+        "looser",
+        num_inference_steps=1,
+        extra_args={"slo_ms": 2500.0, "estimated_cost_s": 1.0},
+    )
+
+    with sched._queue_cv:  # noqa: SLF001
+        q1 = sched._enqueue_request_locked(tighter)  # noqa: SLF001
+        q2 = sched._enqueue_request_locked(looser)  # noqa: SLF001
+        plan = sched._build_waiting_plan(list(sched._waiting_queue), now=q1.enqueue_time)  # noqa: SLF001
+
+    assert q1.sequence_id in plan.feasible_ids
+    assert q2.sequence_id in plan.feasible_ids
+    assert [queued.request.request_ids[0] for queued in plan.on_time_queue] == [
+        "tighter",
+        "looser",
+    ]
 
 
 def test_stage1_scheduler_sjf_uses_remaining_steps():

@@ -261,6 +261,16 @@ class Stage1Scheduler(Scheduler):
         age_s = self._request_age_seconds(queued_request, now)
         return self._queued_cost_seconds(queued_request) / (1.0 + aging_factor * age_s)
 
+    def _on_time_score(self, queued_request: _QueuedRequest, now: float) -> tuple[float, float, float, int]:
+        remaining_cost_s = max(self._queued_cost_seconds(queued_request), 1e-9)
+        slack_s = self._deadline_ts(queued_request) - now - remaining_cost_s
+        return (
+            slack_s / remaining_cost_s,
+            slack_s,
+            queued_request.enqueue_time,
+            queued_request.sequence_id,
+        )
+
     def _availability_ts(self, now: float) -> float:
         if self._active_request is None or self._active_started_at is None:
             return now
@@ -303,7 +313,7 @@ class Stage1Scheduler(Scheduler):
         feasible_ids = {queued.sequence_id for queued in prefix}
         on_time_queue = sorted(
             prefix,
-            key=lambda queued: (self._deadline_ts(queued), queued.enqueue_time, queued.sequence_id),
+            key=lambda queued: self._on_time_score(queued, now),
         )
         best_effort_queue = [queued for queued in waiting_requests if queued.sequence_id not in feasible_ids]
         best_effort_queue = sorted(
