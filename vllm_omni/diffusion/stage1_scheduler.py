@@ -18,6 +18,9 @@ from vllm_omni.diffusion.scheduler import Scheduler
 
 logger = init_logger(__name__)
 
+_DEADLINE_AWARE_POLICIES = {"slo_first", "slack_age", "slack_cost_age"}
+_SLACK_COST_ALPHA = 0.25
+
 
 @dataclass
 class _QueuedRequest:
@@ -261,12 +264,32 @@ class Stage1Scheduler(Scheduler):
         age_s = self._request_age_seconds(queued_request, now)
         return self._queued_cost_seconds(queued_request) / (1.0 + aging_factor * age_s)
 
-    def _on_time_score(self, queued_request: _QueuedRequest, now: float) -> tuple[float, float, float, int]:
+    def _on_time_score(self, queued_request: _QueuedRequest, now: float) -> tuple[float, float, float, float, int]:
         remaining_cost_s = max(self._queued_cost_seconds(queued_request), 1e-9)
         slack_s = self._deadline_ts(queued_request) - now - remaining_cost_s
+        age_s = self._request_age_seconds(queued_request, now)
+        aging_factor = float(getattr(self.od_config, "instance_scheduler_aging_factor", 0.0) or 0.0)
+        policy = self._policy_name()
+        if policy == "slack_age":
+            return (
+                slack_s - (aging_factor * age_s),
+                slack_s,
+                remaining_cost_s,
+                queued_request.enqueue_time,
+                queued_request.sequence_id,
+            )
+        if policy == "slack_cost_age":
+            return (
+                slack_s + (_SLACK_COST_ALPHA * remaining_cost_s) - (aging_factor * age_s),
+                slack_s,
+                remaining_cost_s,
+                queued_request.enqueue_time,
+                queued_request.sequence_id,
+            )
         return (
             slack_s / remaining_cost_s,
             slack_s,
+            remaining_cost_s,
             queued_request.enqueue_time,
             queued_request.sequence_id,
         )
@@ -374,6 +397,9 @@ class Stage1Scheduler(Scheduler):
             )
             return
 
+        if policy not in _DEADLINE_AWARE_POLICIES:
+            return
+
         waiting_before = list(self._waiting_queue)[:-1]
         before_plan = self._build_waiting_plan(waiting_before, now)
         after_plan = self._build_waiting_plan(list(self._waiting_queue), now)
@@ -391,7 +417,7 @@ class Stage1Scheduler(Scheduler):
 
         new_request.schedule_metrics.update(
             {
-                "scheduler_policy": "slo_first",
+                "scheduler_policy": policy,
                 "attain_before": attain_before,
                 "attain_after": attain_after,
                 "self_hit": self_hit,

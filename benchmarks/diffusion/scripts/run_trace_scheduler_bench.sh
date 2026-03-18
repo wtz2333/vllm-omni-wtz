@@ -14,6 +14,7 @@ ENABLE_STEP_CHUNK="${ENABLE_STEP_CHUNK:-0}"
 ENABLE_CHUNK_PREEMPTION="${ENABLE_CHUNK_PREEMPTION:-0}"
 CHUNK_BUDGET_STEPS="${CHUNK_BUDGET_STEPS:-4}"
 SMALL_REQUEST_LATENCY_THRESHOLD_MS="${SMALL_REQUEST_LATENCY_THRESHOLD_MS:-}"
+INSTANCE_SCHEDULER_AGING_FACTOR="${INSTANCE_SCHEDULER_AGING_FACTOR:-1.0}"
 NUM_PROMPTS="${NUM_PROMPTS:-100}"
 MAX_CONCURRENCY="${MAX_CONCURRENCY:-32}"
 REQUEST_RATE="${REQUEST_RATE:-inf}"
@@ -109,6 +110,7 @@ echo "  policy: ${POLICY}"
 echo "  step_chunk: ${ENABLE_STEP_CHUNK}"
 echo "  chunk_preemption: ${ENABLE_CHUNK_PREEMPTION}"
 echo "  small_request_latency_threshold_ms: ${SMALL_REQUEST_LATENCY_THRESHOLD_MS:-<disabled>}"
+echo "  instance_scheduler_aging_factor: ${INSTANCE_SCHEDULER_AGING_FACTOR}"
 echo "  port: ${PORT}"
 echo "  dataset: ${DATASET_PATH}"
 echo "  out_dir: ${OUT_DIR}"
@@ -127,6 +129,7 @@ setsid nohup vllm serve \
   --port "${PORT}" \
   --num-gpus "${NUM_GPUS}" \
   --instance-scheduler-policy "${POLICY}" \
+  --instance-scheduler-aging-factor "${INSTANCE_SCHEDULER_AGING_FACTOR}" \
   $([[ "${ENABLE_STEP_CHUNK}" == "1" ]] && printf '%s ' --diffusion-enable-step-chunk) \
   $([[ "${ENABLE_CHUNK_PREEMPTION}" == "1" ]] && printf '%s ' --diffusion-enable-chunk-preemption) \
   $([[ -n "${SMALL_REQUEST_LATENCY_THRESHOLD_MS}" ]] && printf '%s %s ' --diffusion-small-request-latency-threshold-ms "${SMALL_REQUEST_LATENCY_THRESHOLD_MS}") \
@@ -193,9 +196,9 @@ echo "Key scheduler log lines:"
 grep -E "QUEUE_REORDER|QUEUE_DEQUEUE|QUEUE_ENQUEUE|REQUEST_DONE|REQUEST_FAIL" "${SERVER_LOG}" | tail -n 80 || true
 grep -E "REQUEST_CHUNK_DONE" "${SERVER_LOG}" | tail -n 40 || true
 
-if [[ "${POLICY}" == "slo_first" ]]; then
+if [[ "${POLICY}" == "slo_first" || "${POLICY}" == "slack_age" || "${POLICY}" == "slack_cost_age" ]]; then
   echo
-  echo "SLO-first evidence:"
+  echo "Deadline-aware scheduler evidence:"
   if grep -E "QUEUE_REORDER .*attain_before=.*attain_after=.*self_hit=.*damage_count=" "${SERVER_LOG}" >/dev/null; then
     grep -E "QUEUE_REORDER .*attain_before=.*attain_after=.*self_hit=.*damage_count=" "${SERVER_LOG}" | tail -n 20 || true
   else

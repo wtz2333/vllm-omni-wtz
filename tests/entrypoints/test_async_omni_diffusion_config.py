@@ -72,6 +72,15 @@ def test_small_request_latency_threshold_must_be_positive():
         OmniDiffusionConfig(diffusion_small_request_latency_threshold_ms=0.0)
 
 
+@pytest.mark.parametrize("policy", ["slack_age", "slack_cost_age"])
+def test_new_instance_scheduler_policies_are_accepted(policy: str):
+    from vllm_omni.diffusion.data import OmniDiffusionConfig
+
+    config = OmniDiffusionConfig(instance_scheduler_policy=policy)
+
+    assert config.instance_scheduler_policy == policy
+
+
 def test_default_cache_config_used_when_missing():
     """Ensure default cache_config is applied when cache_backend is set."""
     stage_cfg = _build_stage_cfg(

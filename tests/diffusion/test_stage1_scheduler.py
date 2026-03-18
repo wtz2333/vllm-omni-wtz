@@ -333,6 +333,40 @@ def test_stage1_scheduler_slo_first_orders_on_time_set_by_slack_over_remaining_c
     ]
 
 
+def test_stage1_scheduler_slack_age_prefers_older_request_when_slack_is_tied():
+    sched, _req_q, _res_q = _make_stage1_scheduler(policy="slack_age", slo_target_ms=5000.0, aging_factor=1.0)
+    older = _mock_request("older", num_inference_steps=2, extra_args={"deadline_ts": 24.0, "estimated_cost_s": 2.0})
+    newer = _mock_request("newer", num_inference_steps=1, extra_args={"deadline_ts": 23.0, "estimated_cost_s": 1.0})
+    older.arrival_time = 10.0
+    newer.arrival_time = 15.0
+
+    with sched._queue_cv:  # noqa: SLF001
+        sched._enqueue_request_locked(older)  # noqa: SLF001
+        sched._enqueue_request_locked(newer)  # noqa: SLF001
+        waiting = list(sched._waiting_queue)  # noqa: SLF001
+
+    plan = sched._build_waiting_plan(waiting, now=20.0)  # noqa: SLF001
+
+    assert [queued.request.request_ids[0] for queued in plan.on_time_queue] == ["older", "newer"]
+
+
+def test_stage1_scheduler_slack_cost_age_penalizes_large_request_when_slack_and_age_match():
+    sched, _req_q, _res_q = _make_stage1_scheduler(policy="slack_cost_age", slo_target_ms=5000.0, aging_factor=0.0)
+    large = _mock_request("large", num_inference_steps=4, extra_args={"slo_ms": 8000.0, "estimated_cost_s": 4.0})
+    small = _mock_request("small", num_inference_steps=1, extra_args={"slo_ms": 5000.0, "estimated_cost_s": 1.0})
+    large.arrival_time = 10.0
+    small.arrival_time = 10.0
+
+    with sched._queue_cv:  # noqa: SLF001
+        sched._enqueue_request_locked(large)  # noqa: SLF001
+        sched._enqueue_request_locked(small)  # noqa: SLF001
+        waiting = list(sched._waiting_queue)  # noqa: SLF001
+
+    plan = sched._build_waiting_plan(waiting, now=10.0)  # noqa: SLF001
+
+    assert [queued.request.request_ids[0] for queued in plan.on_time_queue] == ["small", "large"]
+
+
 def test_stage1_scheduler_sjf_uses_remaining_steps():
     sched, _req_q, _res_q = _make_stage1_scheduler(policy="sjf")
     long_req = _mock_request("long", num_inference_steps=10)
@@ -569,6 +603,18 @@ def test_stage1_scheduler_best_effort_aging_uses_request_arrival_time():
     plan = sched._build_waiting_plan(waiting, now=20.0)  # noqa: SLF001
 
     assert [queued.request.request_ids[0] for queued in plan.best_effort_queue] == ["older", "newer"]
+
+
+@pytest.mark.parametrize("policy", ["slack_age", "slack_cost_age"])
+def test_stage1_scheduler_deadline_aware_policies_report_policy_name(policy: str):
+    sched, _req_q, _res_q = _make_stage1_scheduler(policy=policy, slo_target_ms=5000.0, aging_factor=1.0)
+
+    with sched._queue_cv:  # noqa: SLF001
+        queued = sched._enqueue_request_locked(  # noqa: SLF001
+            _mock_request("req", num_inference_steps=2, extra_args={"slo_ms": 5000.0, "estimated_cost_s": 2.0})
+        )
+
+    assert queued.schedule_metrics["scheduler_policy"] == policy
 
 
 @pytest.mark.parametrize(
