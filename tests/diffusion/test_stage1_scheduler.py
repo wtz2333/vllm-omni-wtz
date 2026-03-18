@@ -270,6 +270,31 @@ def test_stage1_scheduler_slo_first_reorders_waiting_queue():
     assert results["urgent"].metrics["queue_reorder_count"] == 1
 
 
+def test_stage1_scheduler_slo_first_splits_on_time_and_best_effort_sets():
+    sched, _req_q, _res_q = _make_stage1_scheduler(policy="slo_first", slo_target_ms=5000.0)
+
+    with sched._queue_cv:  # noqa: SLF001
+        sched._enqueue_request_locked(  # noqa: SLF001
+            _mock_request("cost-4", num_inference_steps=4, extra_args={"slo_ms": 5000.0})
+        )
+        sched._enqueue_request_locked(  # noqa: SLF001
+            _mock_request("cost-3", num_inference_steps=3, extra_args={"slo_ms": 5000.0})
+        )
+        sched._enqueue_request_locked(  # noqa: SLF001
+            _mock_request("cost-2", num_inference_steps=2, extra_args={"slo_ms": 5000.0})
+        )
+        last = sched._enqueue_request_locked(  # noqa: SLF001
+            _mock_request("cost-1", num_inference_steps=1, extra_args={"slo_ms": 5000.0})
+        )
+
+        ordered = [queued.request.request_ids[0] for queued in sched._waiting_queue]  # noqa: SLF001
+
+    assert ordered == ["cost-2", "cost-1", "cost-3", "cost-4"]
+    assert last.schedule_metrics["on_time_set_size"] == 2
+    assert last.schedule_metrics["best_effort_set_size"] == 2
+    assert last.schedule_metrics["dispatch_group"] == "on_time"
+
+
 def test_stage1_scheduler_sjf_uses_remaining_steps():
     sched, _req_q, _res_q = _make_stage1_scheduler(policy="sjf")
     long_req = _mock_request("long", num_inference_steps=10)
@@ -489,6 +514,23 @@ def test_stage1_scheduler_caches_estimated_cost_for_waiting_plan():
     sched._build_waiting_plan(waiting_requests, now=time.monotonic())  # noqa: SLF001
     sched._build_sjf_queue(waiting_requests, now=time.monotonic())  # noqa: SLF001
     assert call_count == 2
+
+
+def test_stage1_scheduler_best_effort_aging_uses_request_arrival_time():
+    sched, _, _ = _make_stage1_scheduler(policy="slo_first", slo_target_ms=5000.0, aging_factor=1.0)
+    older = _mock_request("older", num_inference_steps=8, extra_args={"slo_ms": 5000.0})
+    newer = _mock_request("newer", num_inference_steps=7, extra_args={"slo_ms": 5000.0})
+    older.arrival_time = 10.0
+    newer.arrival_time = 18.0
+
+    with sched._queue_cv:  # noqa: SLF001
+        sched._enqueue_request_locked(older)  # noqa: SLF001
+        sched._enqueue_request_locked(newer)  # noqa: SLF001
+        waiting = list(sched._waiting_queue)  # noqa: SLF001
+
+    plan = sched._build_waiting_plan(waiting, now=20.0)  # noqa: SLF001
+
+    assert [queued.request.request_ids[0] for queued in plan.best_effort_queue] == ["older", "newer"]
 
 
 @pytest.mark.parametrize(

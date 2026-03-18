@@ -31,6 +31,8 @@ class _QueuedRequest:
 @dataclass
 class _WaitingPlan:
     ordered_queue: list[_QueuedRequest]
+    on_time_queue: list[_QueuedRequest]
+    best_effort_queue: list[_QueuedRequest]
     feasible_ids: set[int]
     completion_ts: dict[int, float]
     regret_drop_count: int
@@ -245,10 +247,19 @@ class Stage1Scheduler(Scheduler):
         base_arrival_time = float(base_arrival_time)
         return base_arrival_time + (effective_target_ms / 1000.0)
 
-    def _tail_priority(self, queued_request: _QueuedRequest, now: float) -> float:
+    def _request_age_seconds(self, queued_request: _QueuedRequest, now: float) -> float:
+        request = queued_request.request
+        base_arrival_time = getattr(request, "arrival_time", None)
+        if not isinstance(base_arrival_time, (int, float)):
+            base_arrival_time = getattr(request, "first_enqueue_time", None)
+        if not isinstance(base_arrival_time, (int, float)):
+            base_arrival_time = queued_request.enqueue_time
+        return max(now - float(base_arrival_time), 0.0)
+
+    def _best_effort_score(self, queued_request: _QueuedRequest, now: float) -> float:
         aging_factor = float(getattr(self.od_config, "instance_scheduler_aging_factor", 0.0) or 0.0)
-        wait_s = max(now - queued_request.enqueue_time, 0.0)
-        return self._queued_cost_seconds(queued_request) / (1.0 + aging_factor * wait_s)
+        age_s = self._request_age_seconds(queued_request, now)
+        return self._queued_cost_seconds(queued_request) / (1.0 + aging_factor * age_s)
 
     def _availability_ts(self, now: float) -> float:
         if self._active_request is None or self._active_started_at is None:
@@ -259,7 +270,14 @@ class Stage1Scheduler(Scheduler):
 
     def _build_waiting_plan(self, waiting_requests: list[_QueuedRequest], now: float) -> _WaitingPlan:
         if not waiting_requests:
-            return _WaitingPlan(ordered_queue=[], feasible_ids=set(), completion_ts={}, regret_drop_count=0)
+            return _WaitingPlan(
+                ordered_queue=[],
+                on_time_queue=[],
+                best_effort_queue=[],
+                feasible_ids=set(),
+                completion_ts={},
+                regret_drop_count=0,
+            )
 
         availability_ts = self._availability_ts(now)
         deadline_sorted = sorted(
@@ -283,16 +301,16 @@ class Stage1Scheduler(Scheduler):
                 regret_drop_count += 1
 
         feasible_ids = {queued.sequence_id for queued in prefix}
-        prefix_ordered = sorted(
+        on_time_queue = sorted(
             prefix,
             key=lambda queued: (self._deadline_ts(queued), queued.enqueue_time, queued.sequence_id),
         )
-        tail = [queued for queued in waiting_requests if queued.sequence_id not in feasible_ids]
-        tail_ordered = sorted(
-            tail,
-            key=lambda queued: (self._tail_priority(queued, now), queued.enqueue_time, queued.sequence_id),
+        best_effort_queue = [queued for queued in waiting_requests if queued.sequence_id not in feasible_ids]
+        best_effort_queue = sorted(
+            best_effort_queue,
+            key=lambda queued: (self._best_effort_score(queued, now), queued.enqueue_time, queued.sequence_id),
         )
-        ordered_queue = prefix_ordered + tail_ordered
+        ordered_queue = on_time_queue + best_effort_queue
 
         completion_ts: dict[int, float] = {}
         cursor = availability_ts
@@ -302,6 +320,8 @@ class Stage1Scheduler(Scheduler):
 
         return _WaitingPlan(
             ordered_queue=ordered_queue,
+            on_time_queue=on_time_queue,
+            best_effort_queue=best_effort_queue,
             feasible_ids=feasible_ids,
             completion_ts=completion_ts,
             regret_drop_count=regret_drop_count,
@@ -366,10 +386,14 @@ class Stage1Scheduler(Scheduler):
                 "attain_after": attain_after,
                 "self_hit": self_hit,
                 "damage_count": damage_count,
-                "tail_set_size": len(after_plan.ordered_queue) - len(after_plan.feasible_ids),
+                "on_time_set_size": len(after_plan.on_time_queue),
+                "best_effort_set_size": len(after_plan.best_effort_queue),
+                "tail_set_size": len(after_plan.best_effort_queue),
                 "regret_drop_count": after_plan.regret_drop_count,
                 "queue_reorder_count": 1,
                 "deadline_slack_ms": slack_ms,
+                "dispatch_group": "on_time" if new_request.sequence_id in after_plan.feasible_ids else "best_effort",
+                "estimated_cost_s": self._queued_cost_seconds(new_request),
             }
         )
         request_summary = self._request_summary(new_request.request)
