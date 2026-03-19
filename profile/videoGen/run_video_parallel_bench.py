@@ -364,6 +364,7 @@ def save_csv(rows: list[dict[str, Any]], path: Path) -> None:
         "run_dir",
         "metrics_json",
         "stdout_log",
+        "model_load_seconds",
         "is_timeout",
         "status",
         "error",
@@ -503,6 +504,13 @@ def main() -> None:
                 payload = json.loads(metrics_json.read_text(encoding="utf-8"))
 
             if payload is not None:
+                model_load_seconds = ""
+                model_load_stats = payload.get("model_load_stats", {})
+                if isinstance(model_load_stats, dict):
+                    try:
+                        model_load_seconds = float(model_load_stats.get("latency_seconds", ""))
+                    except Exception:
+                        model_load_seconds = ""
                 for item in payload.get("results", []):
                     rows.append(
                         {
@@ -528,6 +536,7 @@ def main() -> None:
                             "run_dir": str(cfg_dir),
                             "metrics_json": str(metrics_json),
                             "stdout_log": str(stdout_log),
+                            "model_load_seconds": model_load_seconds,
                             "is_timeout": str(item.get("status", "ok")) == "timeout",
                             "status": item.get("status", "ok"),
                             "error": item.get("error", ""),
@@ -568,6 +577,7 @@ def main() -> None:
                     "run_dir": str(cfg_dir),
                     "metrics_json": str(metrics_json),
                     "stdout_log": str(stdout_log),
+                    "model_load_seconds": "",
                     "is_timeout": False,
                     "status": "failed",
                     "error": str(exc),

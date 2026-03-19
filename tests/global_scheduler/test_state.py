@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from vllm_omni.global_scheduler.state import RuntimeStateStore
-from vllm_omni.global_scheduler.types import InstanceSpec
+from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -27,6 +27,10 @@ def _make_store(ewma_alpha: float = 0.2) -> RuntimeStateStore:
         ewma_alpha=ewma_alpha,
         default_ewma_service_time_s=1.0,
     )
+
+
+def _request(request_id: str) -> RequestMeta:
+    return RequestMeta(request_id=request_id, width=1280, height=720, num_frames=16, num_inference_steps=50)
 
 
 def test_snapshot_returns_copy():
@@ -54,7 +58,7 @@ def test_counters_have_lower_bound_protection():
 def test_ewma_updates_on_finish():
     """EWMA service time should update on request finish with latency."""
     store = _make_store(ewma_alpha=0.5)
-    store.on_request_start("worker-0")
+    store.on_request_start("worker-0", _request("r1"))
     stats = store.on_request_finish("worker-0", latency_s=3.0, ok=True)
 
     assert stats.ewma_service_time_s == pytest.approx(2.0)
@@ -66,11 +70,12 @@ def test_concurrent_start_and_finish_updates_are_consistent():
     operations = 200
 
     with ThreadPoolExecutor(max_workers=16) as executor:
-        list(executor.map(lambda _: store.on_request_start("worker-1"), range(operations)))
+        list(executor.map(lambda idx: store.on_request_start("worker-1", _request(f"r{idx}")), range(operations)))
 
     mid = store.snapshot()["worker-1"]
-    assert mid.queue_len == operations
-    assert mid.inflight == operations
+    assert mid.queue_len == operations - 1
+    assert mid.inflight == 1
+    assert len(mid.waiting_requests) == operations - 1
 
     with ThreadPoolExecutor(max_workers=16) as executor:
         list(executor.map(lambda _: store.on_request_finish("worker-1", latency_s=1.0, ok=True), range(operations)))
@@ -78,6 +83,7 @@ def test_concurrent_start_and_finish_updates_are_consistent():
     final = store.snapshot()["worker-1"]
     assert final.queue_len == 0
     assert final.inflight == 0
+    assert final.waiting_requests == ()
 
 
 def test_unknown_instance_raises_key_error():
@@ -85,7 +91,7 @@ def test_unknown_instance_raises_key_error():
     store = _make_store()
 
     with pytest.raises(KeyError, match="Unknown instance id"):
-        store.on_request_start("missing-worker")
+        store.on_request_start("missing-worker", _request("missing"))
 
 
 def test_sync_instances_adds_and_removes_idle_instances():
@@ -103,7 +109,7 @@ def test_sync_instances_adds_and_removes_idle_instances():
 def test_sync_instances_keeps_draining_instance_until_finish_converges():
     """Draining instances should be retained until in-flight work converges."""
     store = _make_store()
-    store.on_request_start("worker-1")
+    store.on_request_start("worker-1", _request("r1"))
 
     store.sync_instances([InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001")])
     after_sync = store.snapshot()
@@ -116,3 +122,45 @@ def test_sync_instances_keeps_draining_instance_until_finish_converges():
 
     final_snapshot = store.snapshot()
     assert "worker-1" not in final_snapshot
+
+
+def test_start_over_capacity_tracks_fifo_waiting_queue():
+    """Requests beyond max concurrency should remain in FIFO waiting state."""
+    store = RuntimeStateStore(
+        instances=[
+            InstanceSpec(
+                id="worker-0",
+                endpoint="http://127.0.0.1:9001",
+                launch_args=["--max-concurrency", "2"],
+            )
+        ]
+    )
+
+    store.on_request_start("worker-0", _request("r1"))
+    store.on_request_start("worker-0", _request("r2"))
+    stats = store.on_request_start("worker-0", _request("r3"))
+
+    assert stats.inflight == 2
+    assert stats.queue_len == 1
+    assert [request.request_id for request in stats.waiting_requests] == ["r3"]
+
+
+def test_finish_promotes_waiting_request_to_inflight():
+    """Finishing one running request should promote the FIFO head from waiting."""
+    store = RuntimeStateStore(
+        instances=[
+            InstanceSpec(
+                id="worker-0",
+                endpoint="http://127.0.0.1:9001",
+                launch_args=["--max-concurrency", "1"],
+            )
+        ]
+    )
+
+    store.on_request_start("worker-0", _request("r1"))
+    store.on_request_start("worker-0", _request("r2"))
+    stats = store.on_request_finish("worker-0", latency_s=0.5, ok=True)
+
+    assert stats.inflight == 1
+    assert stats.queue_len == 0
+    assert stats.waiting_requests == ()

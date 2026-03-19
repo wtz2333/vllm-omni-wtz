@@ -2,6 +2,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+SUPPORTED_BACKENDS = ("vllm-omni", "openai", "v1/videos")
+
+
 @dataclass(slots=True)
 class RequestMeta:
     """Metadata extracted from an incoming routed request.
@@ -31,12 +34,15 @@ class InstanceSpec:
 
     id: str
     endpoint: str
+    instance_type: str | None = None
+    numa_node: int | None = None
     launch_executable: str | None = None
     launch_model: str | None = None
     launch_args: list[str] = field(default_factory=list)
     launch_env: dict[str, str] = field(default_factory=dict)
     stop_executable: str | None = None
     stop_args: list[str] = field(default_factory=list)
+    backends: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -46,6 +52,7 @@ class RuntimeStats:
     queue_len: int = 0
     inflight: int = 0
     ewma_service_time_s: float = 1.0
+    waiting_requests: tuple[RequestMeta, ...] = field(default_factory=tuple)
 
 
 @dataclass(slots=True)

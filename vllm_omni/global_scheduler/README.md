@@ -1,7 +1,7 @@
 # Global Scheduler Serving Guide
 
 This folder contains the global scheduler proxy for vLLM-Omni.
-It exposes a single OpenAI-compatible entrypoint and routes requests to
+It exposes OpenAI-compatible entrypoints and routes requests to
 multiple upstream vLLM instances.
 
 Main module:
@@ -28,11 +28,12 @@ scheduler:
 
 policy:
   baseline:
-    algorithm: fcfs  # fcfs | round_robin | short_queue_runtime | estimated_completion_time
+    algorithm: fcfs  # fcfs | min_queue_length | round_robin | short_queue_runtime | estimated_completion_time
 
 instances:
   - id: worker-0
     endpoint: http://127.0.0.1:9001
+    backends: [vllm-omni, openai]
     launch:
       executable: vllm
       model: Qwen/Qwen-Image
@@ -44,6 +45,7 @@ instances:
       args: ["-f", "vllm serve Qwen/Qwen-Image --port 9001"]
   - id: worker-1
     endpoint: http://127.0.0.1:9002
+    backends: [v1/videos]
     launch:
       executable: vllm
       model: Qwen/Qwen-Image
@@ -107,9 +109,19 @@ curl -sS http://127.0.0.1:8089/v1/chat/completions \
 
 ## 2. Runtime APIs
 
-### 2.1 Request entrypoint
+### 2.1 Request entrypoints
 
 - `POST /v1/chat/completions`
+- `POST /v1/images/generations`
+- `POST /v1/videos`
+
+Backend routing note:
+
+- `/v1/chat/completions` routes to backend `vllm-omni`
+- `/v1/images/generations` routes to backend `openai`
+- `/v1/videos` routes to backend `v1/videos`
+- `instances[].backends` controls which backends an instance can receive.
+- If `instances[].backends` is omitted or empty, that instance is compatible with all backends.
 
 Response headers include:
 
@@ -162,6 +174,7 @@ Notes:
 Set in YAML:
 
 - `policy.baseline.algorithm=fcfs`
+- `policy.baseline.algorithm=min_queue_length`
 - `policy.baseline.algorithm=round_robin`
 - `policy.baseline.algorithm=short_queue_runtime`
 - `policy.baseline.algorithm=estimated_completion_time`

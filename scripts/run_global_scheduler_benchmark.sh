@@ -8,8 +8,9 @@ set -euo pipefail
 
 NUM_PROMPTS="${NUM_PROMPTS:-20}"
 REQUEST_RATE="${REQUEST_RATE:-0.1}"
-REQUEST_RATES="${REQUEST_RATES:-0.1,0.2,0.5,1}"
-REQUEST_DURATION_S="${REQUEST_DURATION_S:-1800}"
+REQUEST_RATES="${REQUEST_RATES:-0.2,0.4,0.6,0.8,1.0}"
+REQUEST_DURATION_S="${REQUEST_DURATION_S:-600}"
+BACKEND="${BACKEND:-vllm-omni}"
 BENCH_RUNNING=0
 BENCH_PID=""
 _CLEANED_UP=0
@@ -83,6 +84,7 @@ values = {
     "WORKER_IDS": " ".join(worker_ids),
     "WORKER_READY_TIMEOUT_S": str(benchmark.worker_ready_timeout_s),
     "MODEL": model,
+    "BACKEND": benchmark.backend,
     "TASK": benchmark.task,
     "DATASET": benchmark.dataset,
     "DATASET_PATH": resolve_config_path(benchmark.dataset_path),
@@ -90,7 +92,6 @@ values = {
     "WARMUP_REQUESTS": str(benchmark.warmup_requests),
     "WARMUP_NUM_INFERENCE_STEPS": str(benchmark.warmup_num_inference_steps),
     "OUTPUT_FILE": resolve_config_path(benchmark.output_file),
-    "AUTO_STOP": "1" if benchmark.auto_stop else "0",
 }
 
 for key, value in values.items():
@@ -198,13 +199,6 @@ else:
 PY
 }
 
-stop_workers() {
-  for wid in ${WORKER_IDS}; do
-    echo "[stop] ${wid}"
-    curl_local -fsS -X POST "${SCHEDULER_URL}/instances/${wid}/stop" >/dev/null || true
-  done
-}
-
 terminate_benchmark() {
   if [[ "${BENCH_RUNNING}" != "1" || -z "${BENCH_PID}" ]]; then
     return 0
@@ -306,9 +300,6 @@ cleanup() {
   _CLEANED_UP=1
 
   terminate_benchmark
-  if [[ "${AUTO_STOP}" == "1" ]]; then
-    stop_workers
-  fi
 }
 
 on_signal() {
@@ -321,83 +312,78 @@ on_exit() {
   cleanup
 }
 
-wait_workers_routable() {
-  local timeout_s="${1:-120}"
-  local start_ts
-  start_ts="$(date +%s)"
-  for wid in ${WORKER_IDS}; do
-    while true; do
-      local routable
-      routable="$(is_worker_routable "${wid}")"
-      if [[ "${routable}" == "1" ]]; then
-        echo "[ready] ${wid} routable=true"
-        break
-      fi
-      if (( $(date +%s) - start_ts > timeout_s )); then
-        echo "Timeout waiting for worker to become routable: ${wid}" >&2
-        return 1
-      fi
-      sleep 1
-    done
-  done
-}
-
 is_worker_api_ready() {
   local endpoint="$1"
-  local tmp_body
-  local status
-  local payload
-  tmp_body="$(mktemp)"
-  payload="$(cat <<EOF
-{"model":"${MODEL}","messages":[{"role":"user","content":"ready-check"}],"extra_body":{"width":64,"height":64,"num_inference_steps":1}}
-EOF
-)"
+  local models_json
+  models_json="$(curl_local -fsS --max-time 30 "${endpoint%/}/v1/models" || true)"
+  if [[ -z "${models_json}" ]]; then
+    echo "0"
+    return 0
+  fi
 
-  status="$(
-    curl_local -sS --max-time 30 -o "${tmp_body}" -w "%{http_code}" \
-      -X POST "${endpoint%/}/v1/chat/completions" \
-      -H 'Content-Type: application/json' \
-      -d "${payload}" || true
-  )"
-  if [[ "${status}" == "200" ]]; then
-    rm -f "${tmp_body}"
-    echo "1"
-    return 0
-  fi
-  if grep -qi "model.*not found" "${tmp_body}" 2>/dev/null; then
-    rm -f "${tmp_body}"
-    echo "MODEL_NOT_FOUND"
-    return 0
-  fi
-  rm -f "${tmp_body}"
-  echo "0"
+  MODELS_JSON="${models_json}" python3 - <<'PY'
+import json
+import os
+
+raw = os.environ.get("MODELS_JSON", "")
+if not raw:
+    print("0")
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(raw)
+except json.JSONDecodeError:
+    print("0")
+    raise SystemExit(0)
+
+models = payload.get("data")
+if isinstance(models, list) and len(models) > 0:
+    print("1")
+else:
+    print("0")
+PY
 }
 
-wait_workers_api_ready() {
+wait_workers_ready() {
   local timeout_s="${1:-600}"
+  local log_interval=60  # 每60秒打印一次等待时间
 
   for wid in ${WORKER_IDS}; do
     local start_ts
     start_ts="$(date +%s)"
+    local last_log_ts="${start_ts}"
+
     while true; do
-      local endpoint
-      local ready
-      endpoint="$(get_worker_endpoint "${wid}")"
+      local endpoint routable ready
+      # 屏蔽所有 curl 错误输出
+      routable="$(is_worker_routable "${wid}" 2>/dev/null)"
+      endpoint="$(get_worker_endpoint "${wid}" 2>/dev/null)"
+      
       if [[ -n "${endpoint}" ]]; then
-        ready="$(is_worker_api_ready "${endpoint}")"
-        if [[ "${ready}" == "1" ]]; then
-          echo "[ready] ${wid} api ready: ${endpoint%/}/v1/chat/completions"
+        ready="$(is_worker_api_ready "${endpoint}" 2>/dev/null)"
+        if [[ "${routable}" == "1" && "${ready}" == "1" ]]; then
+          echo "[ready] ${wid} routable=true api_ready=true (${endpoint%/}/v1/models)"
           break
         fi
-        if [[ "${ready}" == "MODEL_NOT_FOUND" ]]; then
-          echo "Model not found on ${wid}: MODEL=${MODEL}" >&2
-          return 1
-        fi
       fi
-      if (( $(date +%s) - start_ts > timeout_s )); then
-        echo "Timeout waiting for worker API ready: ${wid}" >&2
+
+      # 计算已等待时间
+      local now elapsed
+      now="$(date +%s)"
+      elapsed=$((now - start_ts))
+
+      # 超时判断
+      if (( elapsed > timeout_s )); then
+        echo "Timeout waiting for worker ready (${wid}) after ${elapsed}s" >&2
         return 1
       fi
+
+      # 每 60s 输出一次等待时间（不刷屏）
+      if (( now - last_log_ts >= log_interval )); then
+        echo "[waiting] ${wid} has been waiting for ${elapsed}s ..."
+        last_log_ts="${now}"
+      fi
+
       sleep 2
     done
   done
@@ -423,6 +409,7 @@ run_benchmark_for_rate() {
     --request-rate "${rate}"
     --warmup-requests "${WARMUP_REQUESTS}"
     --warmup-num-inference-steps "${WARMUP_NUM_INFERENCE_STEPS}"
+    --random-request-config '[{"width":512,"height":512,"num_inference_steps":20,"weight":0.15},{"width":768,"height":768,"num_inference_steps":20,"weight":0.25},{"width":1024,"height":1024,"num_inference_steps":25,"weight":0.45},{"width":1536,"height":1536,"num_inference_steps":35,"weight":0.15}]'
   )
   if [[ -n "${DATASET_PATH}" ]]; then
     cmd+=(--dataset-path "${DATASET_PATH}")
@@ -456,8 +443,7 @@ main() {
     exit 1
   fi
 
-  wait_workers_routable "${WORKER_READY_TIMEOUT_S}"
-  wait_workers_api_ready "${WORKER_READY_TIMEOUT_S}"
+  wait_workers_ready "${WORKER_READY_TIMEOUT_S}"
 
   local rate
   for rate in "${REQUEST_RATE_LIST[@]}"; do

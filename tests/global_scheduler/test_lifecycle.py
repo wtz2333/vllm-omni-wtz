@@ -1,12 +1,8 @@
-"""Lifecycle manager health, draining, and reload behavior tests."""
-
-"""Lifecycle manager health, draining, and reload behavior tests."""
-
 import pytest
 
-from vllm_omni.global_scheduler.lifecycle import InstanceLifecycleManager
+from vllm_omni.global_scheduler.lifecycle import InstanceLifecycleManager, _probe_http_ready
 from vllm_omni.global_scheduler.state import RuntimeStateStore
-from vllm_omni.global_scheduler.types import InstanceSpec
+from vllm_omni.global_scheduler.types import InstanceSpec, RequestMeta
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
@@ -26,6 +22,10 @@ def _instances() -> list[InstanceSpec]:
         InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001"),
         InstanceSpec(id="worker-1", endpoint="http://127.0.0.1:9002"),
     ]
+
+
+def _request(request_id: str) -> RequestMeta:
+    return RequestMeta(request_id=request_id)
 
 
 def test_unhealthy_or_disabled_instances_are_excluded_from_routable_set():
@@ -54,7 +54,7 @@ def test_reload_keeps_removed_instance_until_inflight_converges():
     store = RuntimeStateStore(instances=instances)
     manager = InstanceLifecycleManager(instances)
 
-    store.on_request_start("worker-1")
+    store.on_request_start("worker-1", _request("r1"))
     store.sync_instances([InstanceSpec(id="worker-0", endpoint="http://127.0.0.1:9001")])
 
     manager.sync_instances(
@@ -98,7 +98,7 @@ def test_user_disabled_instance_is_kept_after_drain_converges():
     manager = InstanceLifecycleManager(instances)
 
     manager.set_enabled("worker-1", enabled=False)
-    store.on_request_start("worker-1")
+    store.on_request_start("worker-1", _request("r1"))
 
     manager.converge_draining(store.snapshot())
     mid = manager.snapshot()
@@ -125,3 +125,51 @@ def test_non_running_process_state_is_excluded_from_routable_set():
     assert snapshot["worker-0"].process_state == "restarting"
     assert snapshot["worker-0"].last_operation == "restart"
     assert snapshot["worker-0"].last_operation_ts_s is not None
+
+
+def test_probe_http_ready_reports_success_for_non_empty_models(monkeypatch):
+    """HTTP readiness probe should succeed only when models are returned."""
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"data":[{"id":"demo"}]}'
+
+    monkeypatch.setattr(
+        "vllm_omni.global_scheduler.lifecycle._NO_PROXY_OPENER.open",
+        lambda request, timeout: _Response(),
+    )
+
+    healthy, error = _probe_http_ready("http://127.0.0.1:9001", 0.5)
+
+    assert healthy is True
+    assert error is None
+
+
+def test_probe_http_ready_reports_empty_models_as_unhealthy(monkeypatch):
+    """HTTP readiness probe should reject empty model lists."""
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'{"data":[]}'
+
+    monkeypatch.setattr(
+        "vllm_omni.global_scheduler.lifecycle._NO_PROXY_OPENER.open",
+        lambda request, timeout: _Response(),
+    )
+
+    healthy, error = _probe_http_ready("http://127.0.0.1:9001", 0.5)
+
+    assert healthy is False
+    assert error == "ready_probe_empty_models"
