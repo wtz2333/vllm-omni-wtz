@@ -15,12 +15,15 @@ REQUEST_RATE="${REQUEST_RATE:-inf}"
 WARMUP_REQUESTS="${WARMUP_REQUESTS:-5}"
 DATASET="${DATASET:-random}"
 ENABLE_NEGATIVE_PROMPT="${ENABLE_NEGATIVE_PROMPT:-1}"
-RANDOM_REQUEST_CONFIG="${RANDOM_REQUEST_CONFIG:-[
-  {\"width\":512,\"height\":512,\"num_inference_steps\":20,\"weight\":0.15},
-  {\"width\":768,\"height\":768,\"num_inference_steps\":20,\"weight\":0.25},
-  {\"width\":1024,\"height\":1024,\"num_inference_steps\":25,\"weight\":0.45},
-  {\"width\":1536,\"height\":1536,\"num_inference_steps\":35,\"weight\":0.15}
-]}"
+RANDOM_REQUEST_CONFIG="${RANDOM_REQUEST_CONFIG:-}"
+if [[ -z "${RANDOM_REQUEST_CONFIG}" ]]; then
+  RANDOM_REQUEST_CONFIG='[
+  {"width":512,"height":512,"num_inference_steps":20,"weight":0.15},
+  {"width":768,"height":768,"num_inference_steps":20,"weight":0.25},
+  {"width":1024,"height":1024,"num_inference_steps":25,"weight":0.45},
+  {"width":1536,"height":1536,"num_inference_steps":35,"weight":0.15}
+]'
+fi
 DATASET_PATH="${DATASET_PATH:-${ROOT_DIR}/benchmarks/dataset/sd3_trace_redistributed.txt}"
 SLO_SCALE="${SLO_SCALE:-3}"
 CHUNK_BUDGET_STEPS="${CHUNK_BUDGET_STEPS:-4}"
